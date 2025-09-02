@@ -3,6 +3,13 @@ mutable struct MPPI_Logger
     trajectories::Vector{Matrix{Float64}}
     traj_costs::Vector{Float64}
     traj_weights::Vector{Float64}
+    U_hankel::Union{Matrix{Float64},Nothing}
+    Y_hankel::Union{Matrix{Float64},Nothing}
+end
+
+# Convenience constructor preserving old 3-arg usage
+function MPPI_Logger(trajectories::Vector{Matrix{Float64}}, traj_costs::Vector{Float64}, traj_weights::Vector{Float64})
+    MPPI_Logger(trajectories, traj_costs, traj_weights, nothing, nothing)
 end
 
 struct MPPI_Policy_Params{M<:AbstractWeightMethod}
@@ -899,4 +906,40 @@ function calculate_trajectory_costs(pol::NESMPPI_Policy, env::AbstractEnv)
     pol.U = U_orig
     weights = compute_weights(pol.params.weight_method, trajectory_cost)
     return trajectory_cost, E, weights
+end
+
+"""
+    build_hankel(data::Vector{Vector{Float64}}, T::Int)
+
+Construct a Hankel matrix from a vector of vectors.
+Each column is a window of length T from the sequence.
+"""
+function build_hankel(data::Vector{Vector{Float64}}, T::Int)
+    N = length(data)
+    if N < T
+        error("Not enough data to build Hankel matrix (need at least $T samples).")
+    end
+    hankel = [reduce(vcat, data[i:i+T-1]) for i in 1:(N-T+1)]
+    return hcat(hankel...)
+end
+
+function save_hankel_to_logger!(logger::MPPI_Logger, controls::Vector{Vector{Float64}}, states::Vector{Vector{Float64}}, hankel_window::Int)
+    logger.U_hankel = build_hankel(controls, hankel_window)
+    logger.Y_hankel = build_hankel(states, hankel_window)
+end
+
+"""
+    show_hankel_matrices(controls, states, hankel_window)
+
+Build and print Hankel matrices for controls and states.
+"""
+function show_hankel_matrices(controls::Vector{Vector{Float64}}, states::Vector{Vector{Float64}}, hankel_window::Int)
+    U_hankel = build_hankel(controls, hankel_window)
+    Y_hankel = build_hankel(states, hankel_window)
+    println("Hankel matrix for inputs (U): size = ", size(U_hankel))
+    println("First few columns of U_hankel:")
+    println(U_hankel[:, 1:min(3, size(U_hankel, 2))])
+    println("Hankel matrix for states (Y): size = ", size(Y_hankel))
+    println("First few columns of Y_hankel:")
+    println(Y_hankel[:, 1:min(3, size(Y_hankel, 2))])
 end
