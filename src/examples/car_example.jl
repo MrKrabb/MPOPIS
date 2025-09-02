@@ -48,6 +48,18 @@ kwargs:
  - text_on_plot_xy = (80.0, -60.0)                   # XY position of output text (if applicable)
  - save_gif = false,                                 # Save gif
 """
+function hankel_blocks_local(data::AbstractMatrix{T}, L::Int) where T
+    d, N = size(data)
+    N ≥ L || error("Need N ≥ L (got N=$N, L=$L)")
+    cols = N - L + 1
+    H = Matrix{T}(undef, d*L, cols)
+    @inbounds for j in 1:cols
+        w = data[:, j:j+L-1]              # d × L
+        H[:, j] = reshape(permutedims(w, (2,1)), d*L)
+    end
+    return H
+end
+
 function simulate_car_racing(;
     num_trials = 1,
     num_steps = 200,
@@ -78,6 +90,12 @@ function simulate_car_racing(;
     text_with_plot = true,
     text_on_plot_xy = (80.0, -60.0),
     save_gif = false,
+    collect_hankel = false,
+    T_ini = 20,
+    N_pred = 15,
+    save_hankel = false,              # If true and collect_hankel, save Hankel blocks to disk
+    hankel_dir = "hankel_data",       # Output directory for Hankel CSV files
+    hankel_prefix = "car",            # File name prefix
 )
 
     if num_cars > 1
@@ -183,6 +201,13 @@ function simulate_car_racing(;
             ce_elite_threshold, ce_Σ_est,
             cma_σ, cma_elite_threshold,  
         )
+        # Hankel collection init (step 4)
+        if collect_hankel
+            m = action_space_size(action_space(env))
+            p = isa(state(env), Vector) ? length(state(env)) : size(state(env), 2)
+            u_hist = Matrix{Float64}(undef, m, 0)   # (m × N)
+            y_hist = Matrix{Float64}(undef, p, 0)   # (p × N)
+        end
 
         seed!(env, seed + k)
         seed!(pol, seed + k)
@@ -206,6 +231,13 @@ function simulate_car_racing(;
             # Apply action to envrionment
             env(act)
             cnt += 1
+            if collect_hankel
+                u_vec = isa(act, AbstractVector) ? act : vec(act)
+                u_hist = hcat(u_hist, u_vec)
+                y_vec = isa(state(env), AbstractVector) ? copy(state(env)) : copy(state(env))[:]
+                y_hist = hcat(y_hist, y_vec)
+            end
+
             # Get reward at the step
             step_rew = reward(env)
             rew += step_rew
@@ -278,6 +310,51 @@ function simulate_car_racing(;
                 env.done = true
             end
             prev_y = curr_y
+        end
+
+        # Step 6: Build (and optionally save) Hankel matrices for this trial
+        if collect_hankel
+            m = size(u_hist, 1)
+            p = size(y_hist, 1)
+            L = T_ini + N_pred
+            if size(u_hist, 2) >= L && size(y_hist, 2) >= L
+                U_block = hankel_blocks_local(u_hist, L)  # (m*L × cols)
+                Y_block = hankel_blocks_local(y_hist, L)  # (p*L × cols)
+                U_p = U_block[1:m*T_ini, :]
+                U_f = U_block[m*T_ini+1:end, :]
+                Y_p = Y_block[1:p*T_ini, :]
+                Y_f = Y_block[p*T_ini+1:end, :]
+                @printf("Hankel (trial %d): U_p %s, U_f %s, Y_p %s, Y_f %s\n", k, size(U_p), size(U_f), size(Y_p), size(Y_f))
+                if save_hankel
+                    isdir(hankel_dir) || mkpath(hankel_dir)
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_p.csv"), U_p, ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_f.csv"), U_f, ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_p.csv"), Y_p, ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_f.csv"), Y_f, ',')
+                end
+            else
+                @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
+            end
+        end
+
+        if collect_hankel
+            L = T_ini + N_pred
+            if size(u_hist, 2) ≥ L
+                Hu = hankel_blocks_local(u_hist, L)
+                Hy = hankel_blocks_local(y_hist, L)
+                # Partition (optional DeePC blocks)
+                m = size(u_hist,1); p = size(y_hist,1)
+                U_p = Hu[1:(m*T_ini), :]; U_f = Hu[(m*T_ini+1):(m*L), :]
+                Y_p = Hy[1:(p*T_ini), :]; Y_f = Hy[(p*T_ini+1):(p*L), :]
+                @printf("[Hankel] Trial %d: Hu=(%d,%d) Hy=(%d,%d)\n",
+                        k, size(Hu,1), size(Hu,2), size(Hy,1), size(Hy,2))
+                # (Optional) store or save:
+                # pol.logger.U_hankel = Hu
+                # pol.logger.Y_hankel = Hy
+            else
+                @printf("[Hankel] Trial %d: not enough data (need %d, have %d)\n",
+                        k, L, size(u_hist,2))
+            end
         end
         
         # Stop timer

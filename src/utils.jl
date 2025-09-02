@@ -142,3 +142,50 @@ function rollout_model(env::AbstractEnv, T::Int, model_controls::Matrix,
     end
     return traj_cost
 end
+
+"""
+    hankel_blocks(data, L)
+
+Build block Hankel of depth L from data (d × N).
+Rows stacked: [x_k; x_{k+1}; … ; x_{k+L-1}] per column.
+"""
+function hankel_blocks(data::AbstractMatrix{T}, L::Int) where T
+    d, N = size(data)
+    N ≥ L || error("Need N ≥ L (got N=$N, L=$L)")
+    cols = N - L + 1
+    H = Matrix{T}(undef, d * L, cols)
+    @inbounds for j in 1:cols
+        # window j … j+L-1
+        w = data[:, j:j+L-1]              # d × L
+        # reshape into (d*L) vector (column-major already groups by time after permute)
+        H[:, j] = reshape(permutedims(w, (2,1)), d*L)
+    end
+    return H
+end
+
+"""
+    build_deepc_blocks(u_hist, y_hist; T_ini, N_pred)
+
+Return (U_p,U_f,Y_p,Y_f) wrapped in struct for DeePC.
+"""
+struct DeePCData{T}
+    U_p::Matrix{T}
+    U_f::Matrix{T}
+    Y_p::Matrix{T}
+    Y_f::Matrix{T}
+    T_ini::Int
+    N_pred::Int
+end
+
+function build_deepc_blocks(u_hist::AbstractMatrix, y_hist::AbstractMatrix; T_ini::Int, N_pred::Int)
+    @assert size(u_hist, 2) == size(y_hist, 2) "u/y length mismatch"
+    L = T_ini + N_pred
+    Hu = hankel_blocks(u_hist, L)
+    Hy = hankel_blocks(y_hist, L)
+    m = size(u_hist, 1); p = size(y_hist, 1)
+    U_p = Hu[1:(m*T_ini), :]
+    U_f = Hu[(m*T_ini+1):(m*L), :]
+    Y_p = Hy[1:(p*T_ini), :]
+    Y_f = Hy[(p*T_ini+1):(p*L), :]
+    return DeePCData(U_p, U_f, Y_p, Y_f, T_ini, N_pred)
+end
