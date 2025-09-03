@@ -87,10 +87,10 @@ end
 
 function get_controls_roll_U!(pol::AbstractPathIntegralPolicy, weighted_controls::Vector)
     as = pol.params.as
-    # Get control (action set for the first time step)
+    # STEP 5A: Extract first action (receding horizon application)
     control = get_model_controls(action_space(pol.env), weighted_controls[1:as])
 
-    # Roll the control policy so next interation we start with a mean of pol.U
+    # STEP 5B: Roll horizon: shift remaining controls left & append nominal tail
     if pol.params.horizon > 1
         pol.U[1:(end-as)] = weighted_controls[(as+1):end]
         pol.U[(end-as):end] = pol.params.U₀[(end-as):end]

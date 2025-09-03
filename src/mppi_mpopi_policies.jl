@@ -126,18 +126,26 @@ function MPPI_Policy(env::AbstractEnv; kwargs...)
 end
 
 function (pol::MPPI_Policy)(env::AbstractEnv)
-    # Extract number of samples (K), horizon (T), action size (as), and control size (cs)
+    # === STEP 0: Unpack core dimensions ===
+    # K: number of sampled trajectories this iteration
+    # T: planning horizon (steps into the future simulated)
+    # as: action dimension (per single time step)
+    # cs: total control vector length (as * T)
     K, T = pol.params.num_samples, pol.params.horizon
     as, cs = pol.params.as, pol.params.cs
 
-    # Simulate trajectories and get their costs and noise samples
+    # === STEP 1: Sample trajectory noises & forward-simulate to accumulate costs ===
+    # Returns trajectory_cost (length K) and E: sampled noises shaped so that
+    #   E[k, t] gives the perturbation applied at time t for trajectory k (see construction in calculate_trajectory_costs).
     trajectory_cost, E = calculate_trajectory_costs(pol, env)
 
-    # Compute importance weights for each trajectory based on their cost
+    # === STEP 2: Convert costs into importance weights ===
+    # Lower cost => higher weight (Information-Theoretic or other method)
     weights = compute_weights(pol.params.weight_method, trajectory_cost)
     weights = reshape(weights, K, 1)  # Ensure weights are column vector
 
-    # Compute the weighted sum of noise for each time step
+    # === STEP 3: Form weighted control adjustment ===
+    # Aggregate (weighted) exploration noise across all trajectories & timesteps
     weighted_noise = zeros(Float64, cs)
     for t ∈ 1:T
         for k ∈ 1:K
@@ -146,34 +154,35 @@ function (pol::MPPI_Policy)(env::AbstractEnv)
         end
     end
 
-    # Add weighted noise to the nominal control sequence
+    # === STEP 4: Update nominal control sequence (path integral shift) ===
     weighted_controls = pol.U + weighted_noise
-    # Extract the first control to apply and roll the control sequence for next iteration
+    # === STEP 5: Receding horizon: extract first action & roll remaining sequence ===
     control = get_controls_roll_U!(pol, weighted_controls)
 
-    # Optionally log trajectory costs and weights for analysis
+    # === STEP 6: (Optional) Log sample diagnostics ===
     if pol.params.log
         pol.logger.traj_costs = trajectory_cost
         pol.logger.traj_weights = vec(weights)
     end
 
-    # Return the control action to apply to the environment
+    # === STEP 7: Return single-step control to environment ===
     return control
 end
 
 function calculate_trajectory_costs(pol::MPPI_Policy, env::EnvpoolEnv)
+    # === STEP 1A (called by STEP 1 above): Sample noises & rollout simulated trajectories ===
     K, T = pol.params.num_samples, pol.params.horizon
     as = pol.params.as
     γ = pol.params.λ * (1 - pol.params.α)
 
-    # Get samples for which our trajectories will be defined
+    # Draw exploration noise for each (trajectory k, time t)
     P = Distributions.MvNormal(pol.Σ)
     E = rand(pol.rng, P, K, T)
     Σ_inv = Distributions.invcov(P)
 
     trajectory_cost = zeros(Float64, K)
 
-    for t ∈ 1:T
+    for t ∈ 1:T  # advance simulated time index
         Eₜ = E[:, t]
         # Eᵢ = E[k,t]
         uₜ = pol.U[((t-1)*as+1):(t*as)]
@@ -186,7 +195,7 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::EnvpoolEnv)
 
         env(model_controls)
 
-        # Subtrating based on "reward", Adding based on "cost"
+        # Accumulate running cost: negative reward + control shaping term
         trajectory_cost = trajectory_cost - reward(env) + control_costs
         if pol.params.log
             for k ∈ 1:K
