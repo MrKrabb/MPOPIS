@@ -1,0 +1,64 @@
+# How to Use DeePPI
+
+This guide provides a step-by-step introduction to using the MPOPIS package for simulating car racing scenarios. Below, you will find instructions on how to set up the environment, run the simulation, and understand the available options (kwargs).
+
+---
+
+## Step-by-Step Guide
+
+1. **Activate the Julia Shell**:
+    Open your terminal and type the following commands:
+    ```
+    julia
+    ```
+
+2. **Activate the Project Environment**:
+    Once in the Julia shell, activate the project environment:
+    ```julia
+    using Pkg
+    Pkg.activate(".")
+    ```
+
+3. **Load the MPOPIS Package**:
+    After activating the environment, load the MPOPIS package:
+    ```julia
+    using MPOPIS
+    ```
+
+4. **Run the Simulation**:
+    Use the following command to run the car racing simulation:
+    ```julia
+    simulate_car_racing(
+         policy_type = :mppi,
+         collect_hankel = true,
+         T_ini = 20,
+         N_pred = 15,
+         save_hankel = true,
+         save_combined_hankel = true,
+         show_deepc_layout = true,
+         hankel_prefix = "car",
+         plot_traj = true,
+         save_gif = true,
+         label_combined_hankel = true,
+    )
+    ```
+
+---
+
+## Explanation of the Options (kwargs)
+
+- **policy_type**: Specifies the type of policy to use. Default is `:mppi` (Model Predictive Path Integral control).
+- **collect_hankel**: If `true`, collects Hankel matrices during the simulation.
+- **T_ini**: Initial time horizon for the simulation (e.g., 20 steps).
+- **N_pred**: Prediction horizon for the controller (e.g., 15 steps).
+- **save_hankel**: If `true`, saves the generated Hankel matrices to disk.
+- **save_combined_hankel**: If `true`, saves a combined version of all Hankel matrices.
+- **show_deepc_layout**: If `true`, displays the layout for the DeePC (Data-Enabled Predictive Control) algorithm.
+- **hankel_prefix**: Prefix for naming the saved Hankel files (e.g., "car").
+- **plot_traj**: If `true`, plots the trajectory of the car during the simulation.
+- **save_gif**: If `true`, saves an animated GIF of the simulation.
+- **label_combined_hankel**: If `true`, labels the combined Hankel matrix for easier identification.
+
+---
+
+By following the steps above, you can simulate car racing scenarios and customize the behavior of the simulation using the provided options. Happy simulating!

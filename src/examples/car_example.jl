@@ -60,6 +60,120 @@ function hankel_blocks_local(data::AbstractMatrix{T}, L::Int) where T
     return H
 end
 
+# Combine DeePC blocks back into full Hankel (inputs & outputs) and data matrix
+function combine_deepc_blocks(U_p::AbstractMatrix, U_f::AbstractMatrix, Y_p::AbstractMatrix, Y_f::AbstractMatrix)
+    U_block = vcat(U_p, U_f)  # (m*(T_ini+N_pred) × cols)
+    Y_block = vcat(Y_p, Y_f)  # (p*(T_ini+N_pred) × cols)
+    W = vcat(U_p, Y_p, U_f, Y_f)  # Data matrix used in DeePC constraints
+    return U_block, Y_block, W
+end
+
+# Generate row labels for DeePC combined matrix W = [U_p; Y_p; U_f; Y_f]
+# Inputs assumed order: steering, pedal
+# States order (CarRacingEnv): x, y, psi, Vx, Vy, psi_dot, delta, pedal_state
+function deepc_W_row_labels(m::Int, p::Int, T_ini::Int, N_pred::Int;
+    input_names = ["steer", "pedal"],
+    state_names = ["x","y","psi","Vx","Vy","psi_dot","delta","pedal_state"],
+    past_tag = "p", future_tag = "f")
+    length(input_names) == m || error("input_names length $(length(input_names)) != m = $m")
+    length(state_names) == p || error("state_names length $(length(state_names)) != p = $p")
+    labels = String[]
+    # Past inputs
+    for i in 1:m
+        for t in 0:T_ini-1
+            push!(labels, "$(input_names[i])_$(past_tag)_t$(t)")
+        end
+    end
+    # Past states
+    for i in 1:p
+        for t in 0:T_ini-1
+            push!(labels, "$(state_names[i])_$(past_tag)_t$(t)")
+        end
+    end
+    # Future inputs
+    for i in 1:m
+        for t in 0:N_pred-1
+            push!(labels, "$(input_names[i])_$(future_tag)_t$(t)")
+        end
+    end
+    # Future states
+    for i in 1:p
+        for t in 0:N_pred-1
+            push!(labels, "$(state_names[i])_$(future_tag)_t$(t)")
+        end
+    end
+    return labels
+end
+
+# Write annotated CSV: first column row_label, first row header with window indices
+function write_W_with_labels(path::AbstractString, W::AbstractMatrix, labels::Vector{String})
+    size(W,1) == length(labels) || error("Row label count $(length(labels)) != number of W rows $(size(W,1))")
+    open(path, "w") do io
+        cols = size(W,2)
+        # Header
+        print(io, "row_label")
+        for j in 1:cols
+            print(io, ",win$(j)")  # winj corresponds to window starting at time j
+        end
+        print(io, "\n")
+        # Data rows
+        @inbounds for r in 1:length(labels)
+            print(io, labels[r])
+            for c in 1:cols
+                print(io, ",", W[r,c])
+            end
+            print(io, "\n")
+        end
+    end
+    return nothing
+end
+
+"""
+    describe_deepc_layout(U_p, U_f, Y_p, Y_f)
+
+Print an ASCII layout showing how rows correspond to inputs & states over past (T_ini) and future (N_pred) windows.
+"""
+function describe_deepc_layout(U_p, U_f, Y_p, Y_f)
+    T_ini = size(U_p, 1) ÷ max(1, size(U_f,1) == 0 ? 1 : (size(U_p,1) ÷ (size(U_p,1) ÷ (size(U_p,1)))))  # placeholder to avoid division by zero
+    # Recover m, p, T_ini, N_pred robustly
+    # U_p rows = m*T_ini, U_f rows = m*N_pred
+    m = size(U_p,1)
+    p = size(Y_p,1)
+    # Infer m, p by gcd with U_f/Y_f if possible
+    if size(U_f,1) > 0
+        g = gcd(size(U_p,1), size(U_f,1))
+        m = g
+    end
+    if size(Y_f,1) > 0
+        g2 = gcd(size(Y_p,1), size(Y_f,1))
+        p = g2
+    end
+    T_ini = size(U_p,1) ÷ m
+    N_pred = size(U_f,1) ÷ m
+    cols = size(U_p,2)
+    println("DeePC Blocks Layout (columns = $cols overlapping windows):")
+    println("  U_p: m*T_ini = $(m)*$(T_ini) rows (past inputs)")
+    println("  Y_p: p*T_ini = $(p)*$(T_ini) rows (past states)")
+    println("  U_f: m*N_pred = $(m)*$(N_pred) rows (future inputs)")
+    println("  Y_f: p*N_pred = $(p)*$(N_pred) rows (future states)")
+    println()    
+    println("Combined Hankel (inputs only): U_block = vcat(U_p, U_f) size = ", (m*(T_ini+N_pred), cols))
+    println("Combined Hankel (states only): Y_block = vcat(Y_p, Y_f) size = ", (p*(T_ini+N_pred), cols))
+    println("DeePC Data Matrix W = vcat(U_p, Y_p, U_f, Y_f) size = ", (m*T_ini + p*T_ini + m*N_pred + p*N_pred, cols))
+    println()    
+    println("Row grouping in W:")
+    r1 = 1; r2 = m*T_ini
+    println("  Rows $r1:$r2 => U_p (past inputs)")
+    r1 = r2 + 1; r2 += p*T_ini
+    println("  Rows $r1:$r2 => Y_p (past states)")
+    r1 = r2 + 1; r2 += m*N_pred
+    println("  Rows $r1:$r2 => U_f (future inputs)")
+    r1 = r2 + 1; r2 += p*N_pred
+    println("  Rows $r1:$r2 => Y_f (future states)")
+    println()    
+    println("Within each block, consecutive groups of $m (inputs) or $p (states) rows correspond to time t = 0,1,... within that window.")
+end
+
 function simulate_car_racing(;
     num_trials = 1,
     num_steps = 200,
@@ -96,6 +210,9 @@ function simulate_car_racing(;
     save_hankel = false,              # If true and collect_hankel, save Hankel blocks to disk
     hankel_dir = "hankel_data",       # Output directory for Hankel CSV files
     hankel_prefix = "car",            # File name prefix
+    show_deepc_layout = false,         # Print DeePC layout summary when Hankels built
+    save_combined_hankel = false,      # Save combined DeePC data matrix W = [U_p; Y_p; U_f; Y_f]
+    label_combined_hankel = false,     # Additionally write labeled CSV for W (row labels + window headers)
 )
 
     if num_cars > 1
@@ -325,12 +442,29 @@ function simulate_car_racing(;
                 Y_p = Y_block[1:p*T_ini, :]
                 Y_f = Y_block[p*T_ini+1:end, :]
                 @printf("Hankel (trial %d): U_p %s, U_f %s, Y_p %s, Y_f %s\n", k, size(U_p), size(U_f), size(Y_p), size(Y_f))
-                if save_hankel
+                # Always build combined blocks for optional saving
+                U_block_full, Y_block_full, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)
+                if show_deepc_layout
+                    describe_deepc_layout(U_p, U_f, Y_p, Y_f)
+                end
+                if save_hankel || save_combined_hankel
                     isdir(hankel_dir) || mkpath(hankel_dir)
+                end
+                if save_hankel
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_p.csv"), U_p, ',')
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_f.csv"), U_f, ',')
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_p.csv"), Y_p, ',')
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_f.csv"), Y_f, ',')
+                end
+                if save_combined_hankel
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W.csv"), W, ',')
+                    if label_combined_hankel
+                        labels = deepc_W_row_labels(m, p, T_ini, N_pred)
+                        write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W, labels)
+                    end
+                    # Optionally also save the full input/state Hankels (commented out)
+                    # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_block.csv"), U_block_full, ',')
+                    # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_block.csv"), Y_block_full, ',')
                 end
             else
                 @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
