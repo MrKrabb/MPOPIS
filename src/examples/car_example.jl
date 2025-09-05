@@ -129,6 +129,109 @@ function write_W_with_labels(path::AbstractString, W::AbstractMatrix, labels::Ve
 end
 
 """
+        deepc_form_g(W, u_past, y_past, m, p, T_ini; λ_reg=1e-6, enforce_sum=true, nonneg=false)
+
+Compute the DeePC combination vector g using the past blocks within the combined
+DeePC data matrix W = [U_p; Y_p; U_f; Y_f]. Only U_p and Y_p are required to
+solve for g (future blocks are unused for the data equation).
+
+Arguments:
+    W        :: AbstractMatrix   Combined data matrix (rows = stacked blocks)
+    u_past   :: AbstractVector   Length m*T_ini (most recent past inputs, oldest→newest)
+    y_past   :: AbstractVector   Length p*T_ini (most recent past states, oldest→newest)
+    m        :: Int              Number of inputs
+    p        :: Int              Number of states (outputs)
+    T_ini    :: Int              Past window length
+
+Keyword arguments:
+    λ_reg        :: Real  Ridge regularization (improves conditioning)
+    enforce_sum  :: Bool  Impose 1' g = 1 via KKT (common in DeePC)
+    nonneg       :: Bool  Project g onto nonnegative simplex (g ≥ 0, sum=1)
+
+Returns:
+    g :: Vector (length = number of columns in W)
+
+Notes:
+    - Assumes W row ordering produced by this code: first m*T_ini rows = U_p,
+        next p*T_ini rows = Y_p.
+    - Future blocks (following rows) are ignored when forming g.
+    - If you loaded W from CSV, ensure u_past / y_past use the SAME ordering
+        (input/ state for times t=0..T_ini-1). This code expects them stacked by
+        variable then time exactly as in the internal logging (see hankel builder).
+"""
+function deepc_form_g(W::AbstractMatrix, u_past::AbstractVector, y_past::AbstractVector,
+        m::Int, p::Int, T_ini::Int; λ_reg=1e-6, enforce_sum::Bool=true, nonneg::Bool=false)
+
+        n_up_rows = m * T_ini
+        n_yp_rows = p * T_ini
+        size(W,1) >= n_up_rows + n_yp_rows || error("W does not contain enough rows for U_p and Y_p blocks")
+        U_p = W[1:n_up_rows, :]
+        Y_p = W[n_up_rows+1 : n_up_rows + n_yp_rows, :]
+
+        length(u_past) == n_up_rows || error("u_past length $(length(u_past)) ≠ m*T_ini = $(n_up_rows)")
+        length(y_past) == n_yp_rows || error("y_past length $(length(y_past)) ≠ p*T_ini = $(n_yp_rows)")
+
+        # Data equation A g = b
+        A = vcat(U_p, Y_p)              # ((m+p)T_ini × N)
+        b = vcat(u_past, y_past)        # ((m+p)T_ini)
+        N = size(A,2)
+
+        # Normal equations with ridge: (A'A + λI) g = A' b, add sum constraint if desired
+        AtA = A' * A
+        Q = AtA .+ (λ_reg * I)          # (N×N)
+        Atb = A' * b
+        if enforce_sum
+                KKT = [Q ones(N); ones(N)' 0.0]
+                rhs = [Atb; 1.0]
+                sol = KKT \ rhs
+                g = sol[1:N]
+        else
+                g = Q \ Atb
+        end
+
+        if nonneg
+                # Project onto simplex: g >= 0, sum(g)=1 (simple sorting projection)
+                g = max.(g, 0)
+                s = sum(g)
+                if s > 0
+                        g ./= s
+                else
+                        g .= 1 / N
+                end
+                if enforce_sum == false
+                        # ensure sum normalization even if enforce_sum was false
+                        g ./= sum(g)
+                end
+        end
+        return g
+end
+
+"""
+    deepc_random_g(W; rng=Random.GLOBAL_RNG, simplex=true)
+
+Return a random linear combination vector g (length = number of columns of W).
+
+If simplex=true (default), g is sampled from a uniform Dirichlet on the
+probability simplex (g ≥ 0, sum(g)=1), matching the common DeePC constraint
+1' g = 1 and nonnegativity (though DeePC does not always require g ≥ 0).
+
+If simplex=false, returns a zero‑mean Gaussian vector normalized so sum(g)=1
+but entries can be negative.
+"""
+function deepc_random_g(W::AbstractMatrix; rng=Random.GLOBAL_RNG, simplex::Bool=true)
+    N = size(W,2)
+    if simplex
+        g = rand(rng, Dirichlet(ones(N)))
+    else
+        g = randn(rng, N)
+        s = sum(g)
+        s ≈ 0 && (g[1] += 1.0; s = sum(g))
+        g ./= s
+    end
+    return g
+end
+
+"""
     describe_deepc_layout(U_p, U_f, Y_p, Y_f)
 
 Print an ASCII layout showing how rows correspond to inputs & states over past (T_ini) and future (N_pred) windows.
