@@ -283,6 +283,21 @@ function save_trajectory_costs_deppi(path::AbstractString, indices::AbstractVect
 end
 
 """
+    original_trajectory_costs_deppi(pol, env)
+
+Call the existing calculate_trajectory_costs(pol, env) and return only the
+trajectory cost vector, regardless of the specific policy overload.
+"""
+function original_trajectory_costs_deppi(pol, env)
+    res = calculate_trajectory_costs(pol, env)
+    if res isa Tuple
+        return res[1]
+    else
+        return res
+    end
+end
+
+"""
     describe_deepc_layout(U_p, U_f, Y_p, Y_f)
 
 Print an ASCII layout showing how rows correspond to inputs & states over past (T_ini) and future (N_pred) windows.
@@ -637,6 +652,17 @@ function simulate_car_racing(;
                     # Compute residual costs per g against last window of [U_p; Y_p]
                     g_costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; target=:last, pnorm=2)
                     save_trajectory_costs_deppi(joinpath(hankel_dir, "g_costs.csv"), indices, g_costs)
+
+                    # Compute original MPPI-style trajectory costs to compare
+                    # Note: This is the vector of costs for the current policy call, simulated fresh.
+                    orig_costs = original_trajectory_costs_deppi(pol, env)
+                    # Align lengths by truncation/padding if necessary
+                    Lmin = min(length(orig_costs), length(g_costs))
+                    comp = zeros(Float64, Lmin, 3)
+                    comp[:, 1] = orig_costs[1:Lmin]
+                    comp[:, 2] = g_costs[1:Lmin]
+                    comp[:, 3] = comp[:, 1] .- comp[:, 2]
+                    writedlm(joinpath(hankel_dir, "g_costs_comparison.csv"), comp, ',')
                 end
             else
                 @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
