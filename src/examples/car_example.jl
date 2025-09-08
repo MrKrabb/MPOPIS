@@ -316,6 +316,10 @@ function simulate_car_racing(;
     show_deepc_layout = false,         # Print DeePC layout summary when Hankels built
     save_combined_hankel = false,      # Save combined DeePC data matrix W = [U_p; Y_p; U_f; Y_f]
     label_combined_hankel = false,     # Additionally write labeled CSV for W (row labels + window headers)
+    generate_random_gs = false,        # Generate and save random DeePC combination vectors g
+    num_random_g = 50,                 # Number of additional indices after start (0..50 makes 51)
+    g_start_index = 0,                 # Starting index for naming (g_0, g_1, ...)
+    g_simplex = true,                  # Sample g on simplex (Dirichlet) vs Gaussian normalized
 )
 
     if num_cars > 1
@@ -550,7 +554,7 @@ function simulate_car_racing(;
                 if show_deepc_layout
                     describe_deepc_layout(U_p, U_f, Y_p, Y_f)
                 end
-                if save_hankel || save_combined_hankel
+                if save_hankel || save_combined_hankel || generate_random_gs
                     isdir(hankel_dir) || mkpath(hankel_dir)
                 end
                 if save_hankel
@@ -568,6 +572,13 @@ function simulate_car_racing(;
                     # Optionally also save the full input/state Hankels (commented out)
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_block.csv"), U_block_full, ',')
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_block.csv"), Y_block_full, ',')
+                end
+                if generate_random_gs
+                    # Generate indices from g_start_index to g_start_index + num_random_g (inclusive)
+                    for n in g_start_index:(g_start_index + num_random_g)
+                        g = deepc_random_g(W; rng=env.rng, simplex=g_simplex)
+                        writedlm(joinpath(hankel_dir, "g_$(n).csv"), g, ',')
+                    end
                 end
             else
                 @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
