@@ -327,7 +327,7 @@ function _step!(env::CarRacingEnv, a::Vector{Float64})
         Vx += Vx_dot * δt                   # Updated longitudinal velocity
         Vy += Vy_dot * δt                   # Updated lateral velocity
         Ψ += Ψ_dot * δt                     # Updated yaw (heading)
-        Ψ = atan(sin(Ψ), cos(Ψ))
+        Ψ = atan(sin(Ψ), cos(Ψ))                
         x += (Vx * cos(Ψ) - Vy * sin(Ψ)) * δt   # Updated x position yaw heading is counterclockwise, x is north, y is west
         y += (Vx * sin(Ψ) + Vy * cos(Ψ)) * δt   # Updated y position yaw is counterclockwise, x is north, y is west
     end
