@@ -232,7 +232,7 @@ function deepc_random_g(W::AbstractMatrix; rng=Random.GLOBAL_RNG, simplex::Bool=
 end
 
 """
-    calculate_trajectory_costs_deppi(U_p, Y_p, gs; u_past=nothing, y_past=nothing, target=:last, pnorm=2)
+    calculate_trajectory_costs_deppi(U_p, Y_p, gs; u_past=nothing, y_past=nothing, target=:last, pnorm=2, lambda_g=0.0)
 
 Compute residual costs for a set of linear combinations g based on the DeePC
 data equation: cost(g) = || [U_p; Y_p] g - [u_past; y_past] ||_p^p (p=2 by default).
@@ -240,9 +240,10 @@ data equation: cost(g) = || [U_p; Y_p] g - [u_past; y_past] ||_p^p (p=2 by defau
 If u_past/y_past are not provided, the target is taken from one column of
 U_p, Y_p specified by `target` (:last or an Int column index).
 `gs` may be a Vector of vectors, or a matrix with each column a g.
+Adds an L1 regularization term lambda_g * ||g||_1 outside the residual sum (DeePC-style).
 """
 function calculate_trajectory_costs_deppi(U_p::AbstractMatrix, Y_p::AbstractMatrix, gs;
-    u_past=nothing, y_past=nothing, target=:last, pnorm::Int=2)
+    u_past=nothing, y_past=nothing, target=:last, pnorm::Int=2, lambda_g::Real=0.0)
 
     A = vcat(U_p, Y_p)
     # Determine target vector b
@@ -259,13 +260,9 @@ function calculate_trajectory_costs_deppi(U_p::AbstractMatrix, Y_p::AbstractMatr
     costs = similar(collect(1:length(g_list)), Float64)
     @inbounds for (i, g) in enumerate(g_list)
         r = A * g - b
-        if pnorm == 2
-            costs[i] = sum(abs2, r)
-        elseif pnorm == 1
-            costs[i] = sum(abs, r)
-        else
-            costs[i] = sum(abs.(r) .^ pnorm)
-        end
+        base = pnorm == 2 ? sum(abs2, r) : (pnorm == 1 ? sum(abs, r) : sum(abs.(r) .^ pnorm))
+        reg  = lambda_g == 0 ? 0.0 : lambda_g * sum(abs, g)
+        costs[i] = base + reg
     end
     return costs
 end
@@ -386,6 +383,7 @@ function simulate_car_racing(;
     num_random_g = 50,                 # Number of additional indices after start (0..50 makes 51)
     g_start_index = 0,                 # Starting index for naming (g_0, g_1, ...)
     g_simplex = true,                  # Sample g on simplex (Dirichlet) vs Gaussian normalized
+    lambda_g = 0.0,                    # L1 regularization weight on g in _deppi costs
 )
 
     if num_cars > 1
@@ -650,7 +648,7 @@ function simulate_car_racing(;
                         writedlm(joinpath(hankel_dir, "g_$(n).csv"), g, ',')
                     end
                     # Compute residual costs per g against last window of [U_p; Y_p]
-                    g_costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; target=:last, pnorm=2)
+                    g_costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; target=:last, pnorm=2, lambda_g=lambda_g)
                     save_trajectory_costs_deppi(joinpath(hankel_dir, "g_costs.csv"), indices, g_costs)
 
                     # Compute original MPPI-style trajectory costs to compare
