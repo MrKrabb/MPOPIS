@@ -232,6 +232,57 @@ function deepc_random_g(W::AbstractMatrix; rng=Random.GLOBAL_RNG, simplex::Bool=
 end
 
 """
+    calculate_trajectory_costs_deppi(U_p, Y_p, gs; u_past=nothing, y_past=nothing, target=:last, pnorm=2)
+
+Compute residual costs for a set of linear combinations g based on the DeePC
+data equation: cost(g) = || [U_p; Y_p] g - [u_past; y_past] ||_p^p (p=2 by default).
+
+If u_past/y_past are not provided, the target is taken from one column of
+U_p, Y_p specified by `target` (:last or an Int column index).
+`gs` may be a Vector of vectors, or a matrix with each column a g.
+"""
+function calculate_trajectory_costs_deppi(U_p::AbstractMatrix, Y_p::AbstractMatrix, gs;
+    u_past=nothing, y_past=nothing, target=:last, pnorm::Int=2)
+
+    A = vcat(U_p, Y_p)
+    # Determine target vector b
+    if u_past === nothing || y_past === nothing
+        col = target === :last ? size(U_p,2) : Int(target)
+        @assert 1 <= col <= size(U_p,2) "target column out of range"
+        b = vcat(U_p[:, col], Y_p[:, col])
+    else
+        b = vcat(u_past, y_past)
+    end
+
+    # Normalize gs input
+    g_list = isa(gs, AbstractMatrix) ? [view(gs, :, j) for j in 1:size(gs,2)] : gs
+    costs = similar(collect(1:length(g_list)), Float64)
+    @inbounds for (i, g) in enumerate(g_list)
+        r = A * g - b
+        if pnorm == 2
+            costs[i] = sum(abs2, r)
+        elseif pnorm == 1
+            costs[i] = sum(abs, r)
+        else
+            costs[i] = sum(abs.(r) .^ pnorm)
+        end
+    end
+    return costs
+end
+
+"""
+    save_trajectory_costs_deppi(path::AbstractString, indices::AbstractVector, costs::AbstractVector)
+
+Save (index, cost) pairs to CSV.
+"""
+function save_trajectory_costs_deppi(path::AbstractString, indices::AbstractVector, costs::AbstractVector)
+    @assert length(indices) == length(costs)
+    data = hcat(indices, costs)
+    writedlm(path, data, ',')
+    return nothing
+end
+
+"""
     describe_deepc_layout(U_p, U_f, Y_p, Y_f)
 
 Print an ASCII layout showing how rows correspond to inputs & states over past (T_ini) and future (N_pred) windows.
@@ -575,10 +626,17 @@ function simulate_car_racing(;
                 end
                 if generate_random_gs
                     # Generate indices from g_start_index to g_start_index + num_random_g (inclusive)
-                    for n in g_start_index:(g_start_index + num_random_g)
+                    idx_range = g_start_index:(g_start_index + num_random_g)
+                    G = Matrix{Float64}(undef, size(W,2), length(idx_range))
+                    indices = collect(idx_range)
+                    for (col, n) in enumerate(idx_range)
                         g = deepc_random_g(W; rng=env.rng, simplex=g_simplex)
+                        G[:, col] = g
                         writedlm(joinpath(hankel_dir, "g_$(n).csv"), g, ',')
                     end
+                    # Compute residual costs per g against last window of [U_p; Y_p]
+                    g_costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; target=:last, pnorm=2)
+                    save_trajectory_costs_deppi(joinpath(hankel_dir, "g_costs.csv"), indices, g_costs)
                 end
             else
                 @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
