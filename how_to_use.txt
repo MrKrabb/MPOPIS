@@ -25,40 +25,70 @@ This guide provides a step-by-step introduction to using the MPOPIS package for 
     using MPOPIS
     ```
 
-4. **Run the Simulation**:
-    Use the following command to run the car racing simulation:
-    ```julia
-    simulate_car_racing(
-         policy_type = :mppi,
-         collect_hankel = true,
-         T_ini = 20,
-         N_pred = 15,
-         save_hankel = true,
-         save_combined_hankel = true,
-         show_deepc_layout = true,
-         hankel_prefix = "car",
-         plot_traj = true,
-         save_gif = true,
-         label_combined_hankel = true,
-    )
-    ```
+4. **Run it**:
+simulate_car_racing(policy_type=:mppi, collect_hankel=true, T_ini=20, N_pred=15, save_hankel=true, save_combined_hankel=true, label_combined_hankel=true, show_deepc_layout=true, plot_traj=true, save_gif=true, hankel_prefix="car", generate_random_gs=true, num_random_g=167, g_start_index=0, g_simplex=true, hankel_dir="hankel_data", hankel_target_cols=350, hankel_select_strategy=:even)
 
----
+````plaintext
+# How to build and use DeePC data (Hankel blocks and [u_ini; y_ini; u; y])
 
-## Explanation of the Options (kwargs)
+This guide explains how the Hankel blocks (U_p, Y_p, U_f, Y_f) and the DeePC vector [u_ini; y_ini; u; y] are constructed in this repo, with exact code pointers.
 
-- **policy_type**: Specifies the type of policy to use. Default is `:mppi` (Model Predictive Path Integral control).
-- **collect_hankel**: If `true`, collects Hankel matrices during the simulation.
-- **T_ini**: Initial time horizon for the simulation (e.g., 20 steps).
-- **N_pred**: Prediction horizon for the controller (e.g., 15 steps).
-- **save_hankel**: If `true`, saves the generated Hankel matrices to disk.
-- **save_combined_hankel**: If `true`, saves a combined version of all Hankel matrices.
-- **show_deepc_layout**: If `true`, displays the layout for the DeePC (Data-Enabled Predictive Control) algorithm.
-- **hankel_prefix**: Prefix for naming the saved Hankel files (e.g., "car").
-- **plot_traj**: If `true`, plots the trajectory of the car during the simulation.
-- **save_gif**: If `true`, saves an animated GIF of the simulation.
-- **label_combined_hankel**: If `true`, labels the combined Hankel matrix for easier identification.
+Quick start
+- In Julia: using Pkg; Pkg.activate("."); using MPOPIS
+- Run: simulate_car_racing(collect_hankel=true, pol_log=true, save_combined_hankel=true, T_ini=20, N_pred=15)
+- Outputs in hankel_data/: *_W.csv, *_W_labeled.csv, *_uy_vec.csv
 
----
+1) Executed trajectory logging
+- File: src/examples/car_example.jl (simulate_car_racing)
+- In the main loop after act = pol(env); env(act):
+    - u_hist = hcat(u_hist, act)     # applied control (m×N)
+    - y_hist = hcat(y_hist, state(env))  # observed state (p×N)
 
-By following the steps above, you can simulate car racing scenarios and customize the behavior of the simulation using the provided options. Happy simulating!
+2) MPPI rollout logging (for futures across samples)
+- File: src/mppi_mpopi_policies.jl
+- Logger holds per-sample sequences when pol_log=true:
+    - sample_controls[k][t, :] = V_t (T×m)
+    - trajectories[k][t, :]   = predicted state (T×p)
+
+3) Build Hankel blocks from executed data
+- File: src/examples/car_example.jl
+- Function: hankel_blocks_local(data, L) → (d*L)×(N-L+1)
+- After the trial (Step 6):
+    - L = T_ini + N_pred; optional hankel_stride to subsample
+    - U_block = hankel_blocks_local(u_src, L)
+    - Y_block = hankel_blocks_local(y_src, L)
+    - Split executed past/future:
+        - U_p_exec = U_block[1:m*T_ini, :]
+        - U_f_exec = U_block[m*T_ini+1:end, :]
+        - Y_p_exec = Y_block[1:p*T_ini, :]
+        - Y_f_exec = Y_block[p*T_ini+1:end, :]
+
+4) Construct rollout-based futures across samples
+- File: src/examples/car_example.jl (same Step 6 section)
+- If logger.sample_controls exists:
+    - U_f: for each sample k, take first N_pred rows of sample_controls[k] (T×m), transpose to m×N_pred, vec → column; stack over k
+    - Y_f: similarly from trajectories[k]; fallback to executed Y_f_exec if not present
+    - U_p, Y_p: replicate executed past (last window) to K columns:
+        - U_p = repeat(U_p_exec[:, end:end], 1, K)
+        - Y_p = repeat(Y_p_exec[:, end:end], 1, K)
+    - Else (no rollouts): keep U_p_exec, U_f_exec, Y_p_exec, Y_f_exec
+
+5) Combine and save
+- File: src/examples/car_example.jl, combine_deepc_blocks(U_p, U_f, Y_p, Y_f)
+    - W = [U_p; Y_p; U_f; Y_f], plus U_block_full, Y_block_full
+- Saving (when save_combined_hankel=true):
+    - *_W.csv; labeled variant via deepc_W_row_labels when label_combined_hankel=true
+    - Also saves [u_ini; y_ini; u; y] as *_uy_vec.csv, where:
+        - u_ini = U_p_exec[:, end]; y_ini = Y_p_exec[:, end]
+        - u = U_f[:, 1]; y = Y_f[:, 1]  (first rollout column by default)
+
+Helpful options
+- excite_inputs=true: add Gaussian dither to applied control (excite_std, excite_decay)
+- hankel_stride>1: subsample before Hankel to reduce correlation
+- pe_diagnostics=true: print SVD rank of U_block (persistent excitation check)
+- hankel_goal_cols or built-in formula: auto-extend steps so columns are sufficient
+
+Code pointers recap
+
+Outputs
+````

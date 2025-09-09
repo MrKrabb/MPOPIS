@@ -714,44 +714,51 @@ function simulate_car_racing(;
                 Y_p = Y_block[1:p*T_ini, :]
                 Y_f = Y_block[p*T_ini+1:end, :]
                 @printf("Hankel (trial %d): U_p %s, U_f %s, Y_p %s, Y_f %s\n", k, size(U_p), size(U_f), size(Y_p), size(Y_f))
-                    # Executed trajectory split into past/future (for reference and past ini)
+                    # Executed trajectory split into past/future (for reference and [u_ini;y_ini])
                     U_p_exec = U_block[1:m*T_ini, :]
-                    U_f_exec = U_block[m*T_ini+1:end, :]
                     Y_p_exec = Y_block[1:p*T_ini, :]
+                    U_f_exec = U_block[m*T_ini+1:end, :]
                     Y_f_exec = Y_block[p*T_ini+1:end, :]
                     # Default to executed data
                     U_p = U_p_exec
-                    U_f = U_f_exec
                     Y_p = Y_p_exec
+                    U_f = U_f_exec
                     Y_f = Y_f_exec
-                    # If available, build futures from MPPI rollouts across samples (DeePC data bank)
+                    # If available, build DeePC blocks directly from MPPI rollouts across samples:
+                    #   - U_p, Y_p: first T_ini steps of each rollout
+                    #   - U_f, Y_f: last N_pred steps of each rollout
                     if pol_log && pol.logger.sample_controls !== nothing
                         K = length(pol.logger.sample_controls)
-                        Tpred = N_pred
-                        # U_f from sample control sequences
-                        U_f_roll = Matrix{Float64}(undef, m*Tpred, K)
-                        for kk in 1:K
-                            Useg = pol.logger.sample_controls[kk][1:Tpred, :]  # T×m
-                            U_f_roll[:, kk] = vec(permutedims(Useg, (2,1)))
-                        end
-                        # Y_f from sample state trajectories if logged; else fallback to executed future
-                        Y_f_roll = Matrix{Float64}(undef, p*Tpred, K)
-                        has_traj = pol.logger.trajectories !== nothing && length(pol.logger.trajectories) == K
-                        if has_traj
-                            for kk in 1:K
-                                Yseg = pol.logger.trajectories[kk][1:Tpred, :]  # T×p
-                                Y_f_roll[:, kk] = vec(permutedims(Yseg, (2,1)))
-                            end
+                        # total rollout length (time steps) as logged
+                        Ttot = size(pol.logger.sample_controls[1], 1)
+                        if Ttot < T_ini + N_pred
+                            @warn "Logged rollout length Ttot=$(Ttot) < T_ini+N_pred=$(T_ini+N_pred). Falling back to executed Hankels for this trial."
                         else
+                            # Build from controls
+                            U_p_roll = Matrix{Float64}(undef, m*T_ini, K)
+                            U_f_roll = Matrix{Float64}(undef, m*N_pred, K)
                             for kk in 1:K
-                                Y_f_roll[:, kk] = Y_f_exec[:, end]
+                                Useg = pol.logger.sample_controls[kk]           # (Ttot × m)
+                                U_p_roll[:, kk] = vec(Useg[1:T_ini, :])         # first T_ini steps
+                                U_f_roll[:, kk] = vec(Useg[Ttot-N_pred+1:Ttot, :])  # last N_pred steps
                             end
+                            # Build from predicted states
+                            has_traj = pol.logger.trajectories !== nothing && length(pol.logger.trajectories) == K
+                            if has_traj
+                                Y_p_roll = Matrix{Float64}(undef, p*T_ini, K)
+                                Y_f_roll = Matrix{Float64}(undef, p*N_pred, K)
+                                for kk in 1:K
+                                    Yseg = pol.logger.trajectories[kk]          # (Ttot × p)
+                                    Y_p_roll[:, kk] = vec(Yseg[1:T_ini, :])
+                                    Y_f_roll[:, kk] = vec(Yseg[Ttot-N_pred+1:Ttot, :])
+                                end
+                            else
+                                @warn "State trajectories not logged; using executed Y_p/Y_f for all columns."
+                                Y_p_roll = repeat(Y_p_exec[:, end:end], 1, K)
+                                Y_f_roll = repeat(Y_f_exec[:, end:end], 1, K)
+                            end
+                            U_p = U_p_roll; Y_p = Y_p_roll; U_f = U_f_roll; Y_f = Y_f_roll
                         end
-                        # Replicate the executed past for all rollout columns
-                        U_p = repeat(U_p_exec[:, end:end], 1, K)
-                        Y_p = repeat(Y_p_exec[:, end:end], 1, K)
-                        U_f = U_f_roll
-                        Y_f = Y_f_roll
                     end
                 if pe_diagnostics
                     # Check rank and singular values of input Hankel of order L
@@ -785,12 +792,38 @@ function simulate_car_racing(;
                         labels = deepc_W_row_labels(m, p, T_ini, N_pred)
                         write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W[:, sel_idxs], labels)
                     end
-                    # Also save the DeePC vector [u_ini; y_ini; u; y] for the primary column
+                    # Also save the DeePC vector [u_ini; y_ini; u; y]
+                    # u_ini, y_ini = actually executed last T_ini results from environment (not simulated)
                     u_ini = U_p_exec[:, end]
                     y_ini = Y_p_exec[:, end]
-                    col0 = 1
-                    u_vec = U_f[:, col0]
-                    y_vec = Y_f[:, col0]
+                    # Choose rollout for [u; y]: best (min-cost) if available, else first
+                    sel_col = 1
+                    if pol_log && pol.logger.traj_costs !== nothing && length(pol.logger.traj_costs) > 0
+                        sel_col = argmin(pol.logger.traj_costs)
+                    end
+                    # Ensure [u; y] correspond to last N_pred steps of the selected rollout
+                    if pol_log && pol.logger.sample_controls !== nothing
+                        Ttot = size(pol.logger.sample_controls[1], 1)
+                        if Ttot >= N_pred
+                            Useg_sel = pol.logger.sample_controls[sel_col]
+                            u_vec = vec(Useg_sel[Ttot-N_pred+1:Ttot, :])
+                        else
+                            u_vec = U_f[:, sel_col]
+                        end
+                    else
+                        u_vec = U_f[:, sel_col]
+                    end
+                    if pol_log && pol.logger.trajectories !== nothing
+                        Ttot = size(pol.logger.trajectories[1], 1)
+                        if Ttot >= N_pred
+                            Yseg_sel = pol.logger.trajectories[sel_col]
+                            y_vec = vec(Yseg_sel[Ttot-N_pred+1:Ttot, :])
+                        else
+                            y_vec = Y_f[:, sel_col]
+                        end
+                    else
+                        y_vec = Y_f[:, sel_col]
+                    end
                     uy = vcat(u_ini, y_ini, u_vec, y_vec)
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_uy_vec.csv"), uy, ',')
                     # Optionally also save the full input/state Hankels (commented out)
