@@ -830,15 +830,14 @@ function simulate_car_racing(;
                 if save_hankel || save_combined_hankel || generate_random_gs
                     isdir(hankel_dir) || mkpath(hankel_dir)
                 end
-                # Initialize canonical DeePC combination vector g_c (all ones)
-                g_c = ones(Float64, size(W, 2))
-                # Optional: perform one nominal g update using sampled candidates and executed past
-                # (conservative defaults; set step>0 to enable meaningful updates)
+        # Initialize canonical DeePC combination vector g_c (all ones)
+        g_c = ones(Float64, size(W, 2))
+        # Perform one nominal g update using sampled candidates and executed past
                 try
                     u_ini_vec = U_p_exec[:, end]
                     y_ini_vec = Y_p_exec[:, end]
                     deepc_update_nominal_g!(g_c, U_p, Y_p, u_ini_vec, y_ini_vec;
-                        num_samples=64, λ_w=10.0, lambda_g=lambda_g, simplex=true, step=0.0, rng=env.rng, project_sum1=true)
+            num_samples=64, λ_w=10.0, lambda_g=lambda_g, simplex=true, step=1.0, rng=env.rng, project_sum1=true)
                 catch err
                     @warn "g_c update skipped due to error: $(err)"
                 end
@@ -854,6 +853,23 @@ function simulate_car_racing(;
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W.csv"), W[:, sel_idxs], ',')
                     # Save g_c (nominal DeePC combination vector)
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_g_c.csv"), g_c, ',')
+                    # Also compute its DeePC residual cost against executed past and compare to MPPI
+                    try
+                        # Use executed past from last window for residual target
+                        u_ini_loc = U_p_exec[:, end]
+                        y_ini_loc = Y_p_exec[:, end]
+                        gc_cost = calculate_trajectory_costs_deppi(U_p, Y_p, reshape(g_c, :, 1); u_past=u_ini_loc, y_past=y_ini_loc, pnorm=2, lambda_g=lambda_g)[1]
+                        orig_costs = original_trajectory_costs_deppi(pol, env)
+                        mppi_mean = mean(orig_costs)
+                        mppi_min = minimum(orig_costs)
+                        comp_path2 = joinpath(hankel_dir, "g_c_cost_comparison.csv")
+                        open(comp_path2, "w") do io
+                            println(io, "deppi_cost_g_c,mppi_mean_cost,mppi_min_cost,diff_min_minus_g_c,diff_mean_minus_g_c")
+                            println(io, string(gc_cost, ",", mppi_mean, ",", mppi_min, ",", (mppi_min - gc_cost), ",", (mppi_mean - gc_cost)))
+                        end
+                    catch err
+                        @warn "g_c cost comparison skipped due to error: $(err)"
+                    end
                     if label_combined_hankel
                         labels = deepc_W_row_labels(m, p, T_ini, N_pred)
                         write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W[:, sel_idxs], labels)
