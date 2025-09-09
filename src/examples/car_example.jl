@@ -384,11 +384,17 @@ function simulate_car_racing(;
     g_start_index = 0,                 # Starting index for naming (g_0, g_1, ...)
     g_simplex = true,                  # Sample g on simplex (Dirichlet) vs Gaussian normalized
     lambda_g = 0.0,                    # L1 regularization weight on g in _deppi costs
+    # Input excitation to improve persistent excitation of data (applied to executed control)
+    excite_inputs::Bool = false,       # If true, add zero-mean Gaussian dither to applied control
+    excite_std = (0.05, 0.05),         # Std dev per input (tuple length must equal m at runtime)
+    excite_decay::Float64 = 1.0,       # Per-step multiplicative decay (<=1.0); 1.0 = no decay
     hankel_accumulate_trials = false,  # If true, accumulate Hankel windows (columns) across trials
     save_accumulated_hankel = false,   # If true, save the accumulated W at the end of all trials
     hankel_target_cols = 0,            # If >0, when saving, select this many columns from Hankels
     hankel_select_strategy::Symbol = :first,  # :first | :even | :random selection when trimming columns
     hankel_goal_cols::Int = 0,         # If >0, extend steps/laps this trial so N-L+1 >= hankel_goal_cols
+    hankel_stride::Int = 1,            # If >1, subsample time-series before Hankel to reduce correlation
+    pe_diagnostics::Bool = false,      # If true, print rank/SVD diagnostics for input Hankel
 )
 
     if num_cars > 1
@@ -584,6 +590,30 @@ function simulate_car_racing(;
     while !env.done && cnt <= eff_num_steps_k
             # Get action from policy
             act = pol(env)
+            # Optionally add small input excitation (Gaussian dither) to improve data richness
+            if excite_inputs
+                # Build noise vector matching action dimension
+                m_act = isa(act, AbstractVector) ? length(act) : length(vec(act))
+                stds = collect(excite_std)
+                if length(stds) != m_act
+                    # If mismatch, pad/trim to match
+                    if length(stds) < m_act
+                        append!(stds, fill(stds[end], m_act - length(stds)))
+                    else
+                        stds = stds[1:m_act]
+                    end
+                end
+                decay_fac = excite_decay <= 0 ? 1.0 : (excite_decay^max(0, cnt))
+                noise = decay_fac .* (randn(m_act) .* stds)
+                if isa(act, AbstractVector)
+                    act = act .+ noise
+                else
+                    a = vec(act) .+ noise
+                    act = reshape(a, size(act))
+                end
+                # Optional conservative clamp to [-1,1] per element (adjust if env uses different bounds)
+                act = clamp.(act, -1.0, 1.0)
+            end
             # Apply action to envrionment
             env(act)
             cnt += 1
@@ -674,13 +704,65 @@ function simulate_car_racing(;
             p = size(y_hist, 1)
             L = T_ini + N_pred
             if size(u_hist, 2) >= L && size(y_hist, 2) >= L
-                U_block = hankel_blocks_local(u_hist, L)  # (m*L × cols)
-                Y_block = hankel_blocks_local(y_hist, L)  # (p*L × cols)
+                # Optional subsampling/stride to decorrelate windows
+                u_src = hankel_stride > 1 ? u_hist[:, 1:hankel_stride:end] : u_hist
+                y_src = hankel_stride > 1 ? y_hist[:, 1:hankel_stride:end] : y_hist
+                U_block = hankel_blocks_local(u_src, L)  # (m*L × cols)
+                Y_block = hankel_blocks_local(y_src, L)  # (p*L × cols)
                 U_p = U_block[1:m*T_ini, :]
                 U_f = U_block[m*T_ini+1:end, :]
                 Y_p = Y_block[1:p*T_ini, :]
                 Y_f = Y_block[p*T_ini+1:end, :]
                 @printf("Hankel (trial %d): U_p %s, U_f %s, Y_p %s, Y_f %s\n", k, size(U_p), size(U_f), size(Y_p), size(Y_f))
+                    # Executed trajectory split into past/future (for reference and past ini)
+                    U_p_exec = U_block[1:m*T_ini, :]
+                    U_f_exec = U_block[m*T_ini+1:end, :]
+                    Y_p_exec = Y_block[1:p*T_ini, :]
+                    Y_f_exec = Y_block[p*T_ini+1:end, :]
+                    # Default to executed data
+                    U_p = U_p_exec
+                    U_f = U_f_exec
+                    Y_p = Y_p_exec
+                    Y_f = Y_f_exec
+                    # If available, build futures from MPPI rollouts across samples (DeePC data bank)
+                    if pol_log && pol.logger.sample_controls !== nothing
+                        K = length(pol.logger.sample_controls)
+                        Tpred = N_pred
+                        # U_f from sample control sequences
+                        U_f_roll = Matrix{Float64}(undef, m*Tpred, K)
+                        for kk in 1:K
+                            Useg = pol.logger.sample_controls[kk][1:Tpred, :]  # T×m
+                            U_f_roll[:, kk] = vec(permutedims(Useg, (2,1)))
+                        end
+                        # Y_f from sample state trajectories if logged; else fallback to executed future
+                        Y_f_roll = Matrix{Float64}(undef, p*Tpred, K)
+                        has_traj = pol.logger.trajectories !== nothing && length(pol.logger.trajectories) == K
+                        if has_traj
+                            for kk in 1:K
+                                Yseg = pol.logger.trajectories[kk][1:Tpred, :]  # T×p
+                                Y_f_roll[:, kk] = vec(permutedims(Yseg, (2,1)))
+                            end
+                        else
+                            for kk in 1:K
+                                Y_f_roll[:, kk] = Y_f_exec[:, end]
+                            end
+                        end
+                        # Replicate the executed past for all rollout columns
+                        U_p = repeat(U_p_exec[:, end:end], 1, K)
+                        Y_p = repeat(Y_p_exec[:, end:end], 1, K)
+                        U_f = U_f_roll
+                        Y_f = Y_f_roll
+                    end
+                if pe_diagnostics
+                    # Check rank and singular values of input Hankel of order L
+                    desired_rank = m * L
+                    # Numeric rank using tolerance based on eps * max(size)
+                    F = svd(U_block)
+                    tol = maximum(size(U_block)) * eps(eltype(U_block)) * maximum(F.S)
+                    rnk = count(>(tol), F.S)
+                    @printf("[PE] U_block rank=%d (desired m*L=%d), min singular=%.3e, cols=%d\n",
+                            rnk, desired_rank, minimum(F.S), size(U_block, 2))
+                end
                 # Always build combined blocks for optional saving
                 U_block_full, Y_block_full, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)
                 if show_deepc_layout
@@ -703,6 +785,14 @@ function simulate_car_racing(;
                         labels = deepc_W_row_labels(m, p, T_ini, N_pred)
                         write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W[:, sel_idxs], labels)
                     end
+                    # Also save the DeePC vector [u_ini; y_ini; u; y] for the primary column
+                    u_ini = U_p_exec[:, end]
+                    y_ini = Y_p_exec[:, end]
+                    col0 = 1
+                    u_vec = U_f[:, col0]
+                    y_vec = Y_f[:, col0]
+                    uy = vcat(u_ini, y_ini, u_vec, y_vec)
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_uy_vec.csv"), uy, ',')
                     # Optionally also save the full input/state Hankels (commented out)
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_block.csv"), U_block_full, ',')
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_block.csv"), Y_block_full, ',')
