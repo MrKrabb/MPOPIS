@@ -384,6 +384,8 @@ function simulate_car_racing(;
     g_start_index = 0,                 # Starting index for naming (g_0, g_1, ...)
     g_simplex = true,                  # Sample g on simplex (Dirichlet) vs Gaussian normalized
     lambda_g = 0.0,                    # L1 regularization weight on g in _deppi costs
+    hankel_accumulate_trials = false,  # If true, accumulate Hankel windows (columns) across trials
+    save_accumulated_hankel = false,   # If true, save the accumulated W at the end of all trials
 )
 
     if num_cars > 1
@@ -472,6 +474,11 @@ function simulate_car_racing(;
     end
     @printf(" : %7s", "Ex Time")
     @printf("\n")
+
+    # Optional cross-trial accumulation of DeePC data windows
+    W_accum = nothing  # will hold vcat(U_p;Y_p;U_f;Y_f) with columns concatenated across trials
+    m_acc = nothing    # remember m and p for labeling accumulated W
+    p_acc = nothing
 
     for k ∈ 1:num_trials
         
@@ -636,6 +643,18 @@ function simulate_car_racing(;
                     # Optionally also save the full input/state Hankels (commented out)
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_block.csv"), U_block_full, ',')
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_block.csv"), Y_block_full, ',')
+                end
+                # Optionally accumulate columns across trials to increase sample windows
+                if hankel_accumulate_trials
+                    if W_accum === nothing
+                        W_accum = copy(W)
+                        m_acc = m; p_acc = p
+                    else
+                        size(W_accum,1) == size(W,1) || @warn "Accumulated W row size $(size(W_accum,1)) != current W $(size(W,1)); skipping accumulation for trial $(k)."
+                        if size(W_accum,1) == size(W,1)
+                            W_accum = hcat(W_accum, W)
+                        end
+                    end
                 end
                 if generate_random_gs
                     # Generate indices from g_start_index to g_start_index + num_random_g (inclusive)
@@ -819,6 +838,17 @@ function simulate_car_racing(;
     if save_gif
         println("Saving gif...$gif_name")
         gif(anim, gif_name, fps=10)
+    end
+
+    # Save accumulated Hankel (across trials) if requested
+    if hankel_accumulate_trials && save_accumulated_hankel && W_accum !== nothing
+        isdir(hankel_dir) || mkpath(hankel_dir)
+        writedlm(joinpath(hankel_dir, "$(hankel_prefix)_alltrials_W.csv"), W_accum, ',')
+        if label_combined_hankel && m_acc !== nothing && p_acc !== nothing
+            labels = deepc_W_row_labels(m_acc, p_acc, T_ini, N_pred)
+            write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_alltrials_W_labeled.csv"), W_accum, labels)
+        end
+        @printf("Saved accumulated DeePC data matrix W with size %s to %s\n", size(W_accum), joinpath(hankel_dir, "$(hankel_prefix)_alltrials_W.csv"))
     end
 end
 
