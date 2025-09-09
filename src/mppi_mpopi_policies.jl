@@ -5,11 +5,12 @@ mutable struct MPPI_Logger
     traj_weights::Vector{Float64}
     U_hankel::Union{Matrix{Float64},Nothing}
     Y_hankel::Union{Matrix{Float64},Nothing}
+    sample_controls::Union{Vector{Matrix{Float64}},Nothing}  # per-sample control sequences (T×as)
 end
 
 # Convenience constructor preserving old 3-arg usage
 function MPPI_Logger(trajectories::Vector{Matrix{Float64}}, traj_costs::Vector{Float64}, traj_weights::Vector{Float64})
-    MPPI_Logger(trajectories, traj_costs, traj_weights, nothing, nothing)
+    MPPI_Logger(trajectories, traj_costs, traj_weights, nothing, nothing, nothing)
 end
 
 struct MPPI_Policy_Params{M<:AbstractWeightMethod}
@@ -97,9 +98,11 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     end
 
     log_traj = [Matrix{Float64}(undef, (horizon, ss)) for _ in 1:num_samples]
+    log_controls = [Matrix{Float64}(undef, (horizon, as)) for _ in 1:num_samples]
     log_traj_costs = Vector{Float64}(undef, num_samples)
     log_traj_weights = Vector{Float64}(undef, num_samples)
     mppi_logger = MPPI_Logger(log_traj, log_traj_costs, log_traj_weights)
+    mppi_logger.sample_controls = log_controls
 
     params = MPPI_Policy_Params(
         num_samples, horizon, λ, α, U₀, ss, as, cs,
@@ -234,6 +237,7 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
             if pol.params.log
                 # pol.logger.trajectories[k][t, :] = sim_env.state
                 pol.logger.trajectories[k][t, :] = state(sim_env)
+                pol.logger.sample_controls[k][t, :] = Vₜ
             end
         end
     end
