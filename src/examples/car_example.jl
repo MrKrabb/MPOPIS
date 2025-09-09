@@ -933,7 +933,11 @@ function simulate_car_racing(;
                     comp[:, 1] = orig_costs[1:Lmin]
                     comp[:, 2] = g_costs[1:Lmin]
                     comp[:, 3] = comp[:, 1] .- comp[:, 2]
-                    writedlm(joinpath(hankel_dir, "g_costs_comparison.csv"), comp, ',')
+                    comp_path = joinpath(hankel_dir, "g_costs_comparison.csv")
+                    open(comp_path, "w") do io
+                        println(io, "mppi_cost,deppi_cost,diff_mppi_minus_deppi")
+                        writedlm(io, comp, ',')
+                    end
                 end
             else
                 @printf("Trial %d: Not enough samples for Hankel (need ≥ %d, have %d). Skipping.\n", k, L, size(u_hist,2))
