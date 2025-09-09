@@ -388,6 +388,7 @@ function simulate_car_racing(;
     save_accumulated_hankel = false,   # If true, save the accumulated W at the end of all trials
     hankel_target_cols = 0,            # If >0, when saving, select this many columns from Hankels
     hankel_select_strategy::Symbol = :first,  # :first | :even | :random selection when trimming columns
+    hankel_goal_cols::Int = 0,         # If >0, extend steps/laps this trial so N-L+1 >= hankel_goal_cols
 )
 
     if num_cars > 1
@@ -508,6 +509,21 @@ function simulate_car_racing(;
         end
     end
 
+    # If a per-trial Hankel column goal is set, compute effective steps/laps
+    # Columns = N - L + 1 with L = T_ini + N_pred and N ≈ number of collected samples
+    L_goal = T_ini + N_pred
+    eff_num_steps = num_steps
+    eff_laps = laps
+    if hankel_goal_cols > 0
+        required_N = hankel_goal_cols + L_goal - 1
+        # We collect one sample per step; N ≈ eff_num_steps + 1, so steps ≈ required_N - 1
+        eff_num_steps = max(num_steps, required_N - 1)
+        # Avoid early termination due to lap count if user asked for more columns
+        eff_laps = max(laps, typemax(Int) ÷ 2)
+        @printf("Hankel goal: target columns ≥ %d ⇒ setting effective steps=%d (L=%d)\n",
+                hankel_goal_cols, eff_num_steps, L_goal)
+    end
+
     for k ∈ 1:num_trials
         
         if sim_type == :cr
@@ -516,7 +532,7 @@ function simulate_car_racing(;
             env = MultiCarRacingEnv(num_cars, rng=MersenneTwister())
         end
 
-        pol = get_policy(
+    pol = get_policy(
             policy_type,
             env,num_samples, horizon, λ, α, U₀, cov_mat, pol_log, 
             ais_its, 
@@ -524,6 +540,23 @@ function simulate_car_racing(;
             ce_elite_threshold, ce_Σ_est,
             cma_σ, cma_elite_threshold,  
         )
+    # Determine per-trial effective steps/laps to satisfy desired Hankel columns
+    # First honor an explicit hankel_goal_cols if provided; otherwise use formula N_col = (m+1)*(L+n) - 1
+    L_goal = T_ini + N_pred
+    # Base on previously computed global effective steps if any
+    eff_num_steps_k = eff_num_steps
+    eff_laps_k = eff_laps
+    # Determine m,n from the environment state/action spaces
+    m_est = action_space_size(action_space(env))
+    n_est = isa(state(env), Vector) ? length(state(env)) : size(state(env), 2)
+    if collect_hankel && hankel_goal_cols == 0
+        N_col_target = (m_est + 1) * (L_goal + n_est) - 1
+        required_N = N_col_target + L_goal - 1  # ensure N - L + 1 ≥ N_col_target
+        eff_num_steps_k = max(eff_num_steps_k, required_N - 1)
+        eff_laps_k = max(eff_laps_k, typemax(Int) ÷ 2)
+        @printf("Hankel formula: m=%d n=%d L=%d ⇒ target columns=%d ⇒ effective steps=%d\n",
+            m_est, n_est, L_goal, N_col_target, eff_num_steps_k)
+    end
         # Hankel collection init (step 4)
         if collect_hankel
             m = action_space_size(action_space(env))
@@ -535,7 +568,7 @@ function simulate_car_racing(;
         seed!(env, seed + k)
         seed!(pol, seed + k)
 
-        pm = Progress(num_steps, 1, "Trial $k ....", 50)
+    pm = Progress(eff_num_steps_k, 1, "Trial $k ....", 50)
         # Start timer
         time_start = Dates.now()
         
@@ -548,7 +581,7 @@ function simulate_car_racing(;
         trk_viol, β_viol, crash_viol = 0, 0, 0
 
         # Main simulation loop
-        while !env.done && cnt <= num_steps
+    while !env.done && cnt <= eff_num_steps_k
             # Get action from policy
             act = pol(env)
             # Apply action to envrionment
@@ -629,7 +662,7 @@ function simulate_car_racing(;
                 lap += 1
                 lap_time[lap] = cnt
             end
-            if lap >= laps || trk_viol > 10 || β_viol > 50
+            if lap >= eff_laps_k || trk_viol > 10 || β_viol > 50
                 env.done = true
             end
             prev_y = curr_y
@@ -760,7 +793,7 @@ function simulate_car_racing(;
         end 
 
         # For clearing the progress bar
-        if cnt > num_steps
+    if cnt > eff_num_steps_k
             print("\u1b[1F") # Moves cursor to beginning of the line n lines up 
             print("\u1b[0K") # Clears  part of the line. n=0: clear from cursor to end
         else
