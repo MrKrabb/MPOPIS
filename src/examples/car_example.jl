@@ -267,6 +267,58 @@ function calculate_trajectory_costs_deppi(U_p::AbstractMatrix, Y_p::AbstractMatr
     return costs
 end
 
+# Softmin-style weights from costs (Information-Theoretic-like)
+function deepc_softmin_weights(costs::AbstractVector{<:Real}; λ_w::Real=10.0)
+    cmin = minimum(costs)
+    ex = exp.(-(costs .- cmin) ./ max(λ_w, eps()))
+    s = sum(ex)
+    if s <= 0 || !isfinite(s)
+        return fill(1.0 / length(costs), length(costs))
+    end
+    return ex ./ s
+end
+
+# Random g candidates of length N; simplex=true → Dirichlet, else normalized Gaussian
+function deepc_random_g_len(N::Int; rng=Random.GLOBAL_RNG, simplex::Bool=true)
+    if simplex
+        return rand(rng, Dirichlet(ones(N)))
+    else
+        g = randn(rng, N)
+        s = sum(g)
+        s ≈ 0 && (g[1] += 1.0; s = sum(g))
+        return g ./ s
+    end
+end
+
+# One online update step for nominal g_c using sampled candidates and softmin weights
+function deepc_update_nominal_g!(g_c::AbstractVector{<:Real}, U_p::AbstractMatrix, Y_p::AbstractMatrix,
+    u_ini::AbstractVector, y_ini::AbstractVector;
+    num_samples::Int=64, λ_w::Real=10.0, lambda_g::Real=0.0, simplex::Bool=true, step::Real=1.0, rng=Random.GLOBAL_RNG,
+    project_sum1::Bool=true)
+
+    N = length(g_c)
+    # Build candidate set (include current g_c)
+    G = Matrix{Float64}(undef, N, num_samples)
+    for j in 1:num_samples-1
+        G[:, j] = deepc_random_g_len(N; rng=rng, simplex=simplex)
+    end
+    G[:, num_samples] = Float64.(g_c)
+    # Costs for each candidate against executed past
+    costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; u_past=u_ini, y_past=y_ini, pnorm=2, lambda_g=lambda_g)
+    # Weights and weighted estimate
+    w = deepc_softmin_weights(costs; λ_w=λ_w)
+    g_hat = G * w
+    # Update
+    g_new = (1 - step) .* g_c .+ step .* g_hat
+    if project_sum1
+        s = sum(g_new)
+        s ≈ 0 && (g_new .= 1 / N)
+        g_new ./= sum(g_new)
+    end
+    g_c .= g_new
+    return g_c
+end
+
 """
     save_trajectory_costs_deppi(path::AbstractString, indices::AbstractVector, costs::AbstractVector)
 
@@ -778,6 +830,18 @@ function simulate_car_racing(;
                 if save_hankel || save_combined_hankel || generate_random_gs
                     isdir(hankel_dir) || mkpath(hankel_dir)
                 end
+                # Initialize canonical DeePC combination vector g_c (all ones)
+                g_c = ones(Float64, size(W, 2))
+                # Optional: perform one nominal g update using sampled candidates and executed past
+                # (conservative defaults; set step>0 to enable meaningful updates)
+                try
+                    u_ini_vec = U_p_exec[:, end]
+                    y_ini_vec = Y_p_exec[:, end]
+                    deepc_update_nominal_g!(g_c, U_p, Y_p, u_ini_vec, y_ini_vec;
+                        num_samples=64, λ_w=10.0, lambda_g=lambda_g, simplex=true, step=0.0, rng=env.rng, project_sum1=true)
+                catch err
+                    @warn "g_c update skipped due to error: $(err)"
+                end
                 # Determine column indices for optional trimming when saving
                 sel_idxs = _select_indices(size(W,2), hankel_target_cols, hankel_select_strategy)
                 if save_hankel
@@ -788,6 +852,8 @@ function simulate_car_racing(;
                 end
                 if save_combined_hankel
                     writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W.csv"), W[:, sel_idxs], ',')
+                    # Save g_c (nominal DeePC combination vector)
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_g_c.csv"), g_c, ',')
                     if label_combined_hankel
                         labels = deepc_W_row_labels(m, p, T_ini, N_pred)
                         write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W[:, sel_idxs], labels)
