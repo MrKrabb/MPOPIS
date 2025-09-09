@@ -386,6 +386,8 @@ function simulate_car_racing(;
     lambda_g = 0.0,                    # L1 regularization weight on g in _deppi costs
     hankel_accumulate_trials = false,  # If true, accumulate Hankel windows (columns) across trials
     save_accumulated_hankel = false,   # If true, save the accumulated W at the end of all trials
+    hankel_target_cols = 0,            # If >0, when saving, select this many columns from Hankels
+    hankel_select_strategy::Symbol = :first,  # :first | :even | :random selection when trimming columns
 )
 
     if num_cars > 1
@@ -479,6 +481,32 @@ function simulate_car_racing(;
     W_accum = nothing  # will hold vcat(U_p;Y_p;U_f;Y_f) with columns concatenated across trials
     m_acc = nothing    # remember m and p for labeling accumulated W
     p_acc = nothing
+
+    # Helper to select desired column indices given a target
+    function _select_indices(ncols::Int, target::Int, strat::Symbol)
+        if target <= 0 || target >= ncols
+            return collect(1:ncols)
+        end
+        if strat === :first
+            return collect(1:target)
+        elseif strat === :even
+            idxs = unique(round.(Int, range(1, ncols, length=target)))
+            # ensure exactly target by trimming/padding (padding by dropping duplicates at end)
+            if length(idxs) > target
+                idxs = idxs[1:target]
+            elseif length(idxs) < target
+                # fallback to first to reach target
+                need = target - length(idxs)
+                idxs = vcat(idxs, collect(1:need))
+            end
+            return sort(idxs)
+        elseif strat === :random
+            return sort(randperm(ncols)[1:target])
+        else
+            @warn "Unknown hankel_select_strategy=$(strat); using :first"
+            return collect(1:target)
+        end
+    end
 
     for k ∈ 1:num_trials
         
@@ -628,17 +656,19 @@ function simulate_car_racing(;
                 if save_hankel || save_combined_hankel || generate_random_gs
                     isdir(hankel_dir) || mkpath(hankel_dir)
                 end
+                # Determine column indices for optional trimming when saving
+                sel_idxs = _select_indices(size(W,2), hankel_target_cols, hankel_select_strategy)
                 if save_hankel
-                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_p.csv"), U_p, ',')
-                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_f.csv"), U_f, ',')
-                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_p.csv"), Y_p, ',')
-                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_f.csv"), Y_f, ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_p.csv"), U_p[:, sel_idxs], ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_f.csv"), U_f[:, sel_idxs], ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_p.csv"), Y_p[:, sel_idxs], ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_Y_f.csv"), Y_f[:, sel_idxs], ',')
                 end
                 if save_combined_hankel
-                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W.csv"), W, ',')
+                    writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W.csv"), W[:, sel_idxs], ',')
                     if label_combined_hankel
                         labels = deepc_W_row_labels(m, p, T_ini, N_pred)
-                        write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W, labels)
+                        write_W_with_labels(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_W_labeled.csv"), W[:, sel_idxs], labels)
                     end
                     # Optionally also save the full input/state Hankels (commented out)
                     # writedlm(joinpath(hankel_dir, "$(hankel_prefix)_trial$(k)_U_block.csv"), U_block_full, ',')
@@ -659,15 +689,17 @@ function simulate_car_racing(;
                 if generate_random_gs
                     # Generate indices from g_start_index to g_start_index + num_random_g (inclusive)
                     idx_range = g_start_index:(g_start_index + num_random_g)
-                    G = Matrix{Float64}(undef, size(W,2), length(idx_range))
+                    # Use selected W for g sampling consistency when trimming
+                    W_sel = W[:, sel_idxs]
+                    G = Matrix{Float64}(undef, size(W_sel,2), length(idx_range))
                     indices = collect(idx_range)
                     for (col, n) in enumerate(idx_range)
-                        g = deepc_random_g(W; rng=env.rng, simplex=g_simplex)
+                        g = deepc_random_g(W_sel; rng=env.rng, simplex=g_simplex)
                         G[:, col] = g
                         writedlm(joinpath(hankel_dir, "g_$(n).csv"), g, ',')
                     end
                     # Compute residual costs per g against last window of [U_p; Y_p]
-                    g_costs = calculate_trajectory_costs_deppi(U_p, Y_p, G; target=:last, pnorm=2, lambda_g=lambda_g)
+                    g_costs = calculate_trajectory_costs_deppi(U_p[:, sel_idxs], Y_p[:, sel_idxs], G; target=:last, pnorm=2, lambda_g=lambda_g)
                     save_trajectory_costs_deppi(joinpath(hankel_dir, "g_costs.csv"), indices, g_costs)
 
                     # Compute original MPPI-style trajectory costs to compare
