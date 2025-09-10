@@ -262,12 +262,15 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     U₀=zeros(2), cov_mat=block_diagm([0.0625, 0.1], 1),
     deepc_num_samples=64, deepc_step=0.5, deepc_λw=10.0, deepc_lambda_g=0.0, deepc_simplex=true,
     hankel_dir="hankel_data", hankel_prefix="car", save_outputs=true, rng=MersenneTwister(), verbose=true,
-    save_gif::Bool=false, plot_traj::Bool=false, plot_traj_perc::Float64=1.0, text_with_plot::Bool=true, text_on_plot_xy=(80.0,-60.0), constant_velocity::Union{Nothing,Float64}=nothing, show_progress::Bool=true)
+    save_gif::Bool=false, plot_traj::Bool=false, plot_traj_perc::Float64=1.0, text_with_plot::Bool=true, text_on_plot_xy=(80.0,-60.0), constant_velocity::Union{Nothing,Float64}=nothing, show_progress::Bool=true, deepc_temperature::Union{Nothing,Float64}=nothing)
 
     horizon >= T_ini + N_pred || error("horizon must be ≥ T_ini+N_pred")
+    if deepc_temperature !== nothing
+        deepc_λw = deepc_temperature
+    end
+    verbose && println("[DeePPi] Softmin temperature λ_w = $(deepc_λw)")
     env = CarRacingEnv(rng=MersenneTwister(), constant_velocity=constant_velocity)
-    pol = get_policy(:mppi, env, num_samples, horizon, λ, α, U₀, cov_mat, true,
-        10, 20.0, 0.8, :ss, 0.75, 0.8)
+    pol = get_policy(:mppi, env, num_samples, horizon, λ, α, U₀, cov_mat, true, 10, 20.0, 0.8, :ss, 0.75, 0.8)
 
     m = action_space_size(action_space(env))
     p = length(state(env))

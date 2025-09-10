@@ -1,4 +1,3 @@
-
 """
 Example simulating the car racing environment.
 
@@ -455,6 +454,7 @@ function simulate_car_racing(;
     deepc_λw::Float64 = 10.0,
     deepc_lambda_g::Float64 = 0.0,
     deepc_simplex::Bool = true,
+    deepc_temperature::Union{Nothing,Float64}=nothing, # Alias overrides deepc_λw if given
     constant_velocity::Union{Nothing,Float64}=nothing,
     show_progress::Bool = true,
 )
@@ -462,6 +462,8 @@ function simulate_car_racing(;
     # DeePPi single-phase path (option 1): delegate to minimal simulate_deppi_car
     if policy_type == :deppi
         steps_arg = deepc_control_steps > 0 ? deepc_control_steps : num_steps
+        local_temp = deepc_temperature === nothing ? deepc_λw : deepc_temperature
+        println("[DeePPi] Using softmin temperature λ_w = $(local_temp)")
         return simulate_deppi_car(
             T_ini=T_ini,
             N_pred=N_pred,
@@ -474,7 +476,7 @@ function simulate_car_racing(;
             cov_mat=cov_mat,
             deepc_num_samples=deepc_num_samples,
             deepc_step=deepc_step,
-            deepc_λw=deepc_λw,
+            deepc_λw=local_temp,
             deepc_lambda_g=deepc_lambda_g,
             deepc_simplex=deepc_simplex,
             hankel_dir=hankel_dir,
@@ -489,6 +491,7 @@ function simulate_car_racing(;
             text_on_plot_xy=text_on_plot_xy,
             constant_velocity=constant_velocity,
             show_progress=show_progress,
+            deepc_temperature=deepc_temperature,
         )
     end
 
