@@ -29,7 +29,8 @@ function MultiCarRacingEnv(N=2;
     δt=0.01,
     track=string(@__DIR__, "/car_racing_tracks/curve.csv"),
     car_params=[],
-    rng=Random.GLOBAL_RNG
+    rng=Random.GLOBAL_RNG,
+    constant_velocity::Union{Nothing,Float64}=nothing
 )
 
     length(car_params) <= N || error("# Car parameters must be ≤ # cars")
@@ -37,9 +38,9 @@ function MultiCarRacingEnv(N=2;
     envs = Vector{CarRacingEnv}(undef, N)
     for ii in 1:N
         if length(car_params) >= ii
-            cre = CarRacingEnv(car_params; T=T, dt=dt, δt=δt, track=track, rng=rng)
+            cre = CarRacingEnv(car_params; T=T, dt=dt, δt=δt, track=track, rng=rng, constant_velocity=constant_velocity)
         else
-            cre = CarRacingEnv(; T=T, dt=dt, δt=δt, track=track, rng=rng)
+            cre = CarRacingEnv(; T=T, dt=dt, δt=δt, track=track, rng=rng, constant_velocity=constant_velocity)
         end
         envs[ii] = cre
     end

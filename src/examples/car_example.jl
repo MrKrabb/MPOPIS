@@ -447,7 +447,53 @@ function simulate_car_racing(;
     hankel_goal_cols::Int = 0,         # If >0, extend steps/laps this trial so N-L+1 >= hankel_goal_cols
     hankel_stride::Int = 1,            # If >1, subsample time-series before Hankel to reduce correlation
     pe_diagnostics::Bool = false,      # If true, print rank/SVD diagnostics for input Hankel
+    # DeePC bridging kwargs (used only when policy_type == :deppi)
+    deepc_collect_steps::Int = 0,
+    deepc_control_steps::Int = 0,
+    deepc_step::Float64 = 0.5,
+    deepc_num_samples::Int = 64,
+    deepc_λw::Float64 = 10.0,
+    deepc_lambda_g::Float64 = 0.0,
+    deepc_simplex::Bool = true,
+    constant_velocity::Union{Nothing,Float64}=nothing,
 )
+
+    # If user requests DeePC as a policy_type, delegate to dedicated DeePC simulator
+    if policy_type == :deppi
+        collect_steps = deepc_collect_steps > 0 ? deepc_collect_steps : num_steps
+        control_steps = deepc_control_steps > 0 ? deepc_control_steps : num_steps
+        # Ensure output directory exists if saving
+        save_outputs = save_combined_hankel || save_hankel || true
+        return simulate_car_racing_deepc(
+            collect_steps=collect_steps,
+            control_steps=control_steps,
+            T_ini=T_ini,
+            N_pred=N_pred,
+            num_samples=num_samples,
+            horizon=horizon,
+            λ=λ,
+            α=α,
+            cov_mat=cov_mat,
+            U₀=U₀,
+            policy_type=:mppi,  # MPPI used for data collection phase
+            deepc_num_samples=deepc_num_samples,
+            deepc_step=deepc_step,
+            deepc_λw=deepc_λw,
+            deepc_lambda_g=deepc_lambda_g,
+            deepc_simplex=deepc_simplex,
+            hankel_dir=hankel_dir,
+            hankel_prefix=hankel_prefix,
+            save_outputs=save_outputs,
+            rng=MersenneTwister(seed),
+            verbose=true,
+            save_gif=save_gif,
+            plot_traj=plot_traj,
+            plot_traj_perc=plot_traj_perc,
+            text_with_plot=text_with_plot,
+            text_on_plot_xy=text_on_plot_xy,
+            constant_velocity=constant_velocity,
+        )
+    end
 
     if num_cars > 1
         sim_type = :mcr
@@ -585,9 +631,9 @@ function simulate_car_racing(;
     for k ∈ 1:num_trials
         
         if sim_type == :cr
-            env = CarRacingEnv(rng=MersenneTwister())
+            env = CarRacingEnv(rng=MersenneTwister(), constant_velocity=constant_velocity)
         elseif sim_type == :mcr
-            env = MultiCarRacingEnv(num_cars, rng=MersenneTwister())
+            env = MultiCarRacingEnv(num_cars, rng=MersenneTwister(), constant_velocity=constant_velocity)
         end
 
     pol = get_policy(
