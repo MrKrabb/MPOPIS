@@ -34,6 +34,7 @@ mutable struct CarRacingEnv{T,R<:AbstractRNG} <: AbstractEnv
     δt::T
     track::Track
     rng::R
+    constant_Vx::Union{Nothing,T}   # If set, enforce longitudinal speed each step (ignore pedal effects on speed)
 end
 
 """
@@ -62,6 +63,7 @@ end
 - `δt = 0.01,                                   # Time step used for integration`
 - `β_limit = deg2rad(45)                        # Beta penalty limit`
 - `track = string(@__DIR__, "/car_racing_tracks/curve.csv"),   # Track to load`
+- `constant_velocity = nothing,                 # If number, enforces longitudinal speed Vx each step (pedal no longer changes speed)`
 ****** TO-DO Add lane_width
 - `rng = Random.GLOBAL_RNG`
 """
@@ -89,7 +91,8 @@ function CarRacingEnv(;
     β_limit=deg2rad(45),
     track=string(@__DIR__, "/car_racing_tracks/curve.csv"),
     track_sample_factor=20,
-    rng=Random.GLOBAL_RNG
+    rng=Random.GLOBAL_RNG,
+    constant_velocity::Union{Nothing,Float64}=nothing
 )
     params = CarRacingEnvParams{T}(
         m,
@@ -111,7 +114,7 @@ function CarRacingEnv(;
         λ_drive,
         β_limit,
     )
-    return CarRacingEnv(params, T=T, dt=dt, δt=δt, track=track, track_sample_factor=track_sample_factor, rng=rng)
+    return CarRacingEnv(params, T=T, dt=dt, δt=δt, track=track, track_sample_factor=track_sample_factor, rng=rng, constant_velocity=constant_velocity)
 end
 
 """
@@ -123,6 +126,7 @@ end
 - `δt = 0.01,                                                   # Time step used for integration`
 - `track = string(@__DIR__, "/car_racing_tracks/curve.csv"),   # Track to load`
 - `rng = Random.GLOBAL_RNG`
+ - `constant_velocity = nothing` (same behavior as primary constructor)
 """
 function CarRacingEnv(
     params::CarRacingEnvParams;
@@ -131,7 +135,8 @@ function CarRacingEnv(
     δt=0.01,
     track=string(@__DIR__, "/car_racing_tracks/curve.csv"),
     track_sample_factor=10,
-    rng=Random.GLOBAL_RNG
+    rng=Random.GLOBAL_RNG,
+    constant_velocity::Union{Nothing,Float64}=nothing
 )
 
     env = CarRacingEnv(
@@ -143,6 +148,7 @@ function CarRacingEnv(
         δt,
         Track(track, sample_factor=track_sample_factor),
         rng,
+        constant_velocity
     )
 
     reset!(env)
@@ -216,7 +222,7 @@ function RLBase.reset!(env::CarRacingEnv{T}) where {T}
     ss_size = length(env.state)
     env.state = zeros(T, ss_size)
     env.state[3] = deg2rad(90)
-    env.state[4] = 10.0
+    env.state[4] = env.constant_Vx === nothing ? 10.0 : env.constant_Vx
     env.t = 0
     env.done = false
     nothing
@@ -224,6 +230,9 @@ end
 
 function RLBase.reset!(env::CarRacingEnv{T}, state::Vector{T}) where {T}
     env.state = state
+    if env.constant_Vx !== nothing
+        env.state[4] = env.constant_Vx
+    end
     env.t = 0
     env.done = false
     nothing
@@ -300,42 +309,62 @@ function _step!(env::CarRacingEnv, a::Vector{Float64})
     for _ in 1:integration_steps
         δ += Δδ_rate * δt
 
-        # Slip angles for the tires
-        α_f = atan((Vy + env.params.l_f * Ψ_dot), Vx) - δ
-        α_r = atan((Vy - env.params.l_r * Ψ_dot), Vx)
+        if env.constant_Vx === nothing
+            # Full dynamics path (original behavior)
+            # Slip angles
+            α_f = atan((Vy + env.params.l_f * Ψ_dot), Vx) - δ
+            α_r = atan((Vy - env.params.l_r * Ψ_dot), Vx)
+            fx_aero = (env.params.C_D0 + env.params.C_D1 * abs(Vx)) * sign(Vx)
+            accel = env.params.Fx_max * max(pedal, 0.0)
+            brake = env.params.Fx_min * min(pedal, 0.0) * sign(Vx)
+            fx = accel + brake
+            fxf = (pedal <= 0 ? env.params.λ_brake : env.params.λ_drive) * fx
+            fxr = (1 - (pedal <= 0 ? env.params.λ_brake : env.params.λ_drive)) * fx
+            fzf = calc_tire_fz(env.params, fx, 'f')
+            fzr = calc_tire_fz(env.params, fx, 'r')
+            fyf = calc_tire_fy(α_f, env.params.μ_f, env.params.C_αf, fzf, fxf)
+            fyr = calc_tire_fy(α_r, env.params.μ_r, env.params.C_αr, fzr, fxr)
+            Ψ_ddot = (1 / env.params.Izz) * (env.params.l_f * (fxf * sin(δ) + fyf * cos(δ)) - env.params.l_r * fyr)
+            Vy_dot = (1 / env.params.m) * (fyf * cos(δ) + fxf * sin(δ) + fyr) - Ψ_dot * Vx
+            Vx_dot = (1 / env.params.m) * (fxf * cos(δ) - fyf * sin(δ) + fxr - fx_aero) + Ψ_dot * Vy
+            Ψ_dot += Ψ_ddot * δt
+            Vx += Vx_dot * δt
+            Vy += Vy_dot * δt
+        else
+            # Constant longitudinal speed mode: freeze Vx and its dynamics
+            Vx = env.constant_Vx
+            # Compute lateral/yaw evolution with zero longitudinal acceleration influence
+            # Approximate tire forces using current Vy, Ψ_dot, Vx
+            α_f = atan((Vy + env.params.l_f * Ψ_dot), max(Vx, 1e-6)) - δ
+            α_r = atan((Vy - env.params.l_r * Ψ_dot), max(Vx, 1e-6))
+            # Neglect longitudinal forces (fx=0) but keep lateral for yaw/lateral coupling
+            fx = 0.0; fxf = 0.0; fxr = 0.0
+            fzf = calc_tire_fz(env.params, fx, 'f')
+            fzr = calc_tire_fz(env.params, fx, 'r')
+            fyf = calc_tire_fy(α_f, env.params.μ_f, env.params.C_αf, fzf, fxf)
+            fyr = calc_tire_fy(α_r, env.params.μ_r, env.params.C_αr, fzr, fxr)
+            Ψ_ddot = (1 / env.params.Izz) * (env.params.l_f * (fyf * cos(δ)) - env.params.l_r * fyr)
+            Vy_dot = (1 / env.params.m) * (fyf * cos(δ) + fyr) - Ψ_dot * Vx
+            Ψ_dot += Ψ_ddot * δt
+            Vy += Vy_dot * δt
+            # Optional stability clamp if Vy drifts when Vx small
+            if abs(Vy) > 5 * max(1.0, abs(Vx))
+                Vy = sign(Vy) * 5 * max(1.0, abs(Vx))
+            end
+        end
 
-        # Simple drag
-        fx_aero = (env.params.C_D0 + env.params.C_D1 * abs(Vx)) * sign(Vx)
-
-        accel = env.params.Fx_max * max(pedal, 0.0)
-        brake = env.params.Fx_min * min(pedal, 0.0) * sign(Vx) # Opposite direction of long velocity
-        fx = accel + brake
-
-        # Distribution of the forces on the front and rear tires
-        fxf = (pedal <= 0 ? env.params.λ_brake : env.params.λ_drive) * fx
-        fxr = (1 - (pedal <= 0 ? env.params.λ_brake : env.params.λ_drive)) * fx
-        fzf = calc_tire_fz(env.params, fx, 'f')
-        fzr = calc_tire_fz(env.params, fx, 'r')
-        fyf = calc_tire_fy(α_f, env.params.μ_f, env.params.C_αf, fzf, fxf)
-        fyr = calc_tire_fy(α_r, env.params.μ_r, env.params.C_αr, fzr, fxr)
-
-        Ψ_ddot = (1 / env.params.Izz) * (env.params.l_f * (fxf * sin(δ) + fyf * cos(δ)) - env.params.l_r * fyr)
-        Vy_dot = (1 / env.params.m) * (fyf * cos(δ) + fxf * sin(δ) + fyr) - Ψ_dot * Vx
-        Vx_dot = (1 / env.params.m) * (fxf * cos(δ) - fyf * sin(δ) + fxr - fx_aero) + Ψ_dot * Vy
-
-        Ψ_dot += Ψ_ddot * δt                # Updated yaw rate
-        Vx += Vx_dot * δt                   # Updated longitudinal velocity
-        Vy += Vy_dot * δt                   # Updated lateral velocity
-        Ψ += Ψ_dot * δt                     # Updated yaw (heading)
-        Ψ = atan(sin(Ψ), cos(Ψ))                
-        x += (Vx * cos(Ψ) - Vy * sin(Ψ)) * δt   # Updated x position yaw heading is counterclockwise, x is north, y is west
-        y += (Vx * sin(Ψ) + Vy * cos(Ψ)) * δt   # Updated y position yaw is counterclockwise, x is north, y is west
+        Ψ += Ψ_dot * δt
+        Ψ = atan(sin(Ψ), cos(Ψ))
+        # Integrate position with (possibly overridden) Vx
+        Vx_int = env.constant_Vx === nothing ? Vx : env.constant_Vx
+        x += (Vx_int * cos(Ψ) - Vy * sin(Ψ)) * δt
+        y += (Vx_int * sin(Ψ) + Vy * cos(Ψ)) * δt
     end
 
     env.state[1] = x
     env.state[2] = y
     env.state[3] = Ψ
-    env.state[4] = Vx
+    env.state[4] = env.constant_Vx === nothing ? Vx : env.constant_Vx
     env.state[5] = Vy
     env.state[6] = Ψ_dot
     env.state[7] = δ
