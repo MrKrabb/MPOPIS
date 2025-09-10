@@ -57,6 +57,9 @@ function simulate_car_racing_deepc(;
 )
     # (Removed internal `using` statements; dependencies are already imported at module level.)
     verbose && @printf("[DeePC] Phase 1: Collecting data with MPPI for %d steps...\n", collect_steps)
+    # ------------------------------------------------------------------
+    # 1) Environment + data collection (rollouts for DeePC data)
+    # ------------------------------------------------------------------
     # Build environment
     env = CarRacingEnv(rng=MersenneTwister(), constant_velocity=constant_velocity)
     # Enable logging so sample_controls & trajectories are captured
@@ -83,6 +86,9 @@ function simulate_car_racing_deepc(;
 
     size(u_hist,2) >= L || error("Not enough collected data (have $(size(u_hist,2)), need ≥ $(L))")
 
+    # ------------------------------------------------------------------
+    # 2) HANKEL / DeePC DATA MATRIX CREATION
+    # ------------------------------------------------------------------
     # Build Hankel blocks from executed trajectory (for reference) and from rollouts for futures/pasts per sample
     U_block = hankel_blocks_local(u_hist, L)
     Y_block = hankel_blocks_local(y_hist, L)
@@ -91,7 +97,7 @@ function simulate_car_racing_deepc(;
     Y_p_exec = Y_block[1:p*T_ini, :]
     Y_f_exec = Y_block[p*T_ini+1:end, :]
 
-    # Rollout-derived DeePC blocks
+    # Rollout-derived DeePC blocks (each sample k -> past window first T_ini steps; future window last N_pred steps)
     if pol.logger.sample_controls === nothing
         @warn "Policy logger has no sample_controls; using executed Hankel windows only."
         U_p = U_p_exec; Y_p = Y_p_exec; U_f = U_f_exec; Y_f = Y_f_exec
@@ -137,11 +143,16 @@ function simulate_car_racing_deepc(;
         end
     end
 
-    _, _, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)
+    # Combine into DeePC data matrix W = [U_p; Y_p; U_f; Y_f]
+    _, _, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)  # <- (Hankel / data matrix done)
+
+    # ------------------------------------------------------------------
+    # 3) DEFINE NOMINAL g_c
+    # ------------------------------------------------------------------
     ncols = size(W,2)
-    g_c = ones(Float64, ncols) # nominal DeePC combination vector
+    g_c = ones(Float64, ncols)         # Initial nominal DeePC combination vector g_c
     g_hist = Matrix{Float64}(undef, ncols, control_steps+1)
-    g_hist[:, 1] = g_c
+    g_hist[:, 1] = g_c                 # Log initial g_c
 
     # Phase 2: DeePC control
     verbose && @printf("[DeePC] Phase 2: DeePC control for %d steps...\n", control_steps)
@@ -176,14 +187,24 @@ function simulate_car_racing_deepc(;
         # Form past vectors
         u_past_vec = flatten_past(u_buf)
         y_past_vec = flatten_past(y_buf)
-        # Update nominal g_c
+        # ------------------------------------------------------------------
+        # 4) SAMPLE CANDIDATE g's & UPDATE g_c
+        #    deepc_update_nominal_g! internally:
+        #      - samples 'deepc_num_samples' candidate g vectors (Dirichlet / Gaussian)
+        #      - evaluates residual cost ||[U_p;Y_p] g - [u_past;y_past]||
+        #      - computes softmin weights (λ_w) and updates g_c ← (1-step)*g_c + step*g_hat
+        # ------------------------------------------------------------------
         deepc_update_nominal_g!(g_c, U_p, Y_p, u_past_vec, y_past_vec;
             num_samples=deepc_num_samples, λ_w=deepc_λw, lambda_g=deepc_lambda_g,
             simplex=deepc_simplex, step=deepc_step, rng=rng, project_sum1=true)
         g_hist[:, t+1] = g_c
-        # Compute predicted future inputs and apply first control
-        u_future = U_f * g_c  # length m*N_pred
-        u_now = u_future[1:m]
+        # ------------------------------------------------------------------
+        # 5) EXTRACT CONTROL INPUT FROM g_c
+        #    Future input sequence = U_f * g_c  (stacked m*N_pred vector)
+        #    Apply only the first control (receding horizon): u_now = (U_f * g_c)[1:m]
+        # ------------------------------------------------------------------
+        u_future = U_f * g_c              # length m*N_pred (predicted future inputs)
+        u_now = u_future[1:m]             # first m entries used as current control
         env2(u_now)
         u_applied[:, t] = u_now
         # Observe new state and update buffers (drop oldest column)
@@ -251,7 +272,9 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     m = action_space_size(action_space(env))
     p = length(state(env))
 
-    # Warm-up executed past
+    # ------------------------------------------------------------------
+    # 1) WARM-UP: Collect executed past of length T_ini (for past window)
+    # ------------------------------------------------------------------
     u_buf = zeros(Float64, m, 0)
     y_buf = zeros(Float64, p, 0)
     while size(u_buf,2) < T_ini && !env.done
@@ -264,7 +287,9 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     show_progress && println("[DeePPi] Warm-up complete." )
     size(u_buf,2) == T_ini || error("Could not warm-up to T_ini steps")
 
-    # Build DeePC blocks from logged rollouts
+    # ------------------------------------------------------------------
+    # 2) BUILD HANKEL / DeePC DATA (U_p, U_f, Y_p, Y_f, then W)
+    # ------------------------------------------------------------------
     pol.logger.sample_controls === nothing && error("Policy logging off; enable pol_log=true")
     K = length(pol.logger.sample_controls)
     Ttot = size(pol.logger.sample_controls[1], 1)
@@ -292,9 +317,13 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
         end
     end
 
-    _, _, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)
+    _, _, W = combine_deepc_blocks(U_p, U_f, Y_p, Y_f)   # <- HANKEL / data matrix W
+
+    # ------------------------------------------------------------------
+    # 3) DEFINE INITIAL g_c
+    # ------------------------------------------------------------------
     ncols = size(W,2)
-    g_c = ones(Float64, ncols)
+    g_c = ones(Float64, ncols)          # nominal DeePC combination vector
     g_hist = Matrix{Float64}(undef, ncols, steps+1)
     g_hist[:,1] = g_c
     u_applied = Matrix{Float64}(undef, m, steps)
@@ -311,11 +340,17 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
         end
         u_past_vec = flatten_past(u_buf)
         y_past_vec = flatten_past(y_buf)
-        deepc_update_nominal_g!(g_c, U_p, Y_p, u_past_vec, y_past_vec; num_samples=deepc_num_samples,
+    # ------------------------------------------------------------------
+    # 4) SAMPLE g CANDIDATES & UPDATE g_c (same logic as above function)
+    # ------------------------------------------------------------------
+    deepc_update_nominal_g!(g_c, U_p, Y_p, u_past_vec, y_past_vec; num_samples=deepc_num_samples,
             λ_w=deepc_λw, lambda_g=deepc_lambda_g, simplex=deepc_simplex, step=deepc_step, rng=rng, project_sum1=true)
         g_hist[:, t+1] = g_c
-        u_future = U_f * g_c
-        u_now = u_future[1:m]
+    # ------------------------------------------------------------------
+    # 5) EXTRACT CONTROL FROM g_c (first m entries of U_f * g_c)
+    # ------------------------------------------------------------------
+    u_future = U_f * g_c            # predicted stacked future inputs
+    u_now = u_future[1:m]           # apply only first step
         env(u_now)
         u_applied[:, t] = u_now
         y_new = copy(state(env))
