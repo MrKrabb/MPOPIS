@@ -456,26 +456,22 @@ function simulate_car_racing(;
     deepc_lambda_g::Float64 = 0.0,
     deepc_simplex::Bool = true,
     constant_velocity::Union{Nothing,Float64}=nothing,
+    show_progress::Bool = true,
 )
 
-    # If user requests DeePC as a policy_type, delegate to dedicated DeePC simulator
+    # DeePPi single-phase path (option 1): delegate to minimal simulate_deppi_car
     if policy_type == :deppi
-        collect_steps = deepc_collect_steps > 0 ? deepc_collect_steps : num_steps
-        control_steps = deepc_control_steps > 0 ? deepc_control_steps : num_steps
-        # Ensure output directory exists if saving
-        save_outputs = save_combined_hankel || save_hankel || true
-        return simulate_car_racing_deepc(
-            collect_steps=collect_steps,
-            control_steps=control_steps,
+        steps_arg = deepc_control_steps > 0 ? deepc_control_steps : num_steps
+        return simulate_deppi_car(
             T_ini=T_ini,
             N_pred=N_pred,
-            num_samples=num_samples,
             horizon=horizon,
+            steps=steps_arg,
+            num_samples=num_samples,
             λ=λ,
             α=α,
-            cov_mat=cov_mat,
             U₀=U₀,
-            policy_type=:mppi,  # MPPI used for data collection phase
+            cov_mat=cov_mat,
             deepc_num_samples=deepc_num_samples,
             deepc_step=deepc_step,
             deepc_λw=deepc_λw,
@@ -483,7 +479,7 @@ function simulate_car_racing(;
             deepc_simplex=deepc_simplex,
             hankel_dir=hankel_dir,
             hankel_prefix=hankel_prefix,
-            save_outputs=save_outputs,
+            save_outputs=save_combined_hankel || save_hankel || true,
             rng=MersenneTwister(seed),
             verbose=true,
             save_gif=save_gif,
@@ -492,6 +488,7 @@ function simulate_car_racing(;
             text_with_plot=text_with_plot,
             text_on_plot_xy=text_on_plot_xy,
             constant_velocity=constant_velocity,
+            show_progress=show_progress,
         )
     end
 

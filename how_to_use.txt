@@ -26,7 +26,7 @@ This guide provides a step-by-step introduction to using the MPOPIS package for 
     ```
 
 4. **Run it**:
-simulate_car_racing(policy_type=:mppi, collect_hankel=true, T_ini=20, N_pred=15, save_hankel=true, save_combined_hankel=true, label_combined_hankel=true, show_deepc_layout=true, plot_traj=true, save_gif=true, hankel_prefix="car", generate_random_gs=true, num_random_g=167, g_start_index=0, g_simplex=true, hankel_dir="hankel_data", hankel_target_cols=350, hankel_select_strategy=:even)
+simulate_car_racing(policy_type=:deppi, num_steps=300, T_ini=1, N_pred=15, horizon=50, constant_velocity=10.0, save_gif=true, show_progress=true)
 
 ````plaintext
 # How to build and use DeePC data (Hankel blocks and [u_ini; y_ini; u; y])
