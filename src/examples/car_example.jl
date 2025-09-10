@@ -421,6 +421,7 @@ function simulate_car_racing(;
     text_with_plot = true,
     text_on_plot_xy = (80.0, -60.0),
     save_gif = false,
+    save_traj_png::Union{Nothing,String}=nothing,
     collect_hankel = false,
     T_ini = 20,
     N_pred = 15,
@@ -455,8 +456,12 @@ function simulate_car_racing(;
     deepc_lambda_g::Float64 = 0.0,
     deepc_simplex::Bool = true,
     deepc_temperature::Union{Nothing,Float64}=nothing, # Alias overrides deepc_λw if given
+    deepc_rollout_lambda::Union{Nothing,Float64}=nothing,  # Override λ only for DeePPi data collection rollouts
+    deepc_rollout_cov_scale::Float64=1.0,                 # Scale covariance only for data collection rollouts
     constant_velocity::Union{Nothing,Float64}=nothing,
     show_progress::Bool = true,
+    deepc_use_saved_W::Bool=false,                        # If true, load combined W from CSV (skip building new Hankel)
+    deepc_W_file::Union{Nothing,String}=nothing,          # Path to W CSV when deepc_use_saved_W=true
 )
 
     # DeePPi single-phase path (option 1): delegate to minimal simulate_deppi_car
@@ -485,6 +490,7 @@ function simulate_car_racing(;
             rng=MersenneTwister(seed),
             verbose=true,
             save_gif=save_gif,
+            save_traj_png=save_traj_png,
             plot_traj=plot_traj,
             plot_traj_perc=plot_traj_perc,
             text_with_plot=text_with_plot,
@@ -492,6 +498,10 @@ function simulate_car_racing(;
             constant_velocity=constant_velocity,
             show_progress=show_progress,
             deepc_temperature=deepc_temperature,
+            deepc_rollout_lambda=deepc_rollout_lambda,
+            deepc_rollout_cov_scale=deepc_rollout_cov_scale,
+            deepc_use_saved_W=deepc_use_saved_W,
+            deepc_W_file=deepc_W_file,
         )
     end
 
