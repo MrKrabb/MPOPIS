@@ -241,7 +241,7 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     U₀=zeros(2), cov_mat=block_diagm([0.0625, 0.1], 1),
     deepc_num_samples=64, deepc_step=0.5, deepc_λw=10.0, deepc_lambda_g=0.0, deepc_simplex=true,
     hankel_dir="hankel_data", hankel_prefix="car", save_outputs=true, rng=MersenneTwister(), verbose=true,
-    save_gif::Bool=false, plot_traj::Bool=false, plot_traj_perc::Float64=1.0, text_with_plot::Bool=true, text_on_plot_xy=(80.0,-60.0), constant_velocity::Union{Nothing,Float64}=nothing)
+    save_gif::Bool=false, plot_traj::Bool=false, plot_traj_perc::Float64=1.0, text_with_plot::Bool=true, text_on_plot_xy=(80.0,-60.0), constant_velocity::Union{Nothing,Float64}=nothing, show_progress::Bool=true)
 
     horizon >= T_ini + N_pred || error("horizon must be ≥ T_ini+N_pred")
     env = CarRacingEnv(rng=MersenneTwister(), constant_velocity=constant_velocity)
@@ -255,11 +255,13 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     u_buf = zeros(Float64, m, 0)
     y_buf = zeros(Float64, p, 0)
     while size(u_buf,2) < T_ini && !env.done
+        show_progress && print("[DeePPi] Warm-up $(size(u_buf,2)+1)/$T_ini\r")
         act = pol(env)              # also logs rollouts internally
         env(act)
         u_buf = hcat(u_buf, isa(act, AbstractVector) ? act : vec(act))
         y_buf = hcat(y_buf, copy(state(env)))
     end
+    show_progress && println("[DeePPi] Warm-up complete." )
     size(u_buf,2) == T_ini || error("Could not warm-up to T_ini steps")
 
     # Build DeePC blocks from logged rollouts
@@ -304,6 +306,9 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
     # Control loop (optional gif)
     anim = save_gif ? Animation() : nothing
     for t in 1:steps
+        if show_progress && (t == 1 || t % 10 == 0 || t == steps)
+            print("[DeePPi] Control step $t/$steps  \r")
+        end
         u_past_vec = flatten_past(u_buf)
         y_past_vec = flatten_past(y_buf)
         deepc_update_nominal_g!(g_c, U_p, Y_p, u_past_vec, y_past_vec; num_samples=deepc_num_samples,
@@ -343,6 +348,7 @@ function simulate_deppi_car(; T_ini=20, N_pred=15, horizon=50, steps=300, num_sa
         verbose && println("[DeePPi Simple] Saving gif..." * gif_name)
         gif(anim, gif_name, fps=10)
     end
+    show_progress && println("\n[DeePPi] Control loop complete.")
     verbose && @printf("[DeePPi Simple] Completed %d steps. Final residual=%.4f\n", steps, gc_costs[min(steps,end)])
     return (W=W, g_c=g_c, g_hist=g_hist, u_applied=u_applied, gc_costs=gc_costs)
 end
