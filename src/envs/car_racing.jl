@@ -207,9 +207,11 @@ end
 function RLBase.reward(env::CarRacingEnv{T}) where {T}
     rew = 0.0
     within_tuple = within_track(env)
+    # If the car is outside the track boundaries
     if !within_tuple.within
         rew += -1000000.0
     end
+    # If sideslip is excessive
     if exceed_β(env)
         rew += -5000.0
     end
