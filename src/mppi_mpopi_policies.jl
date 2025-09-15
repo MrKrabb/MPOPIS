@@ -10,7 +10,6 @@ end
 
 # File-wide dependencies for Hankel/G I/O
 using DelimitedFiles
-using Logging
 
 # Convenience constructor preserving old 3-arg usage
 function MPPI_Logger(trajectories::Vector{Matrix{Float64}}, traj_costs::Vector{Float64}, traj_weights::Vector{Float64})
@@ -48,7 +47,7 @@ kwargs:
 function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     num_samples::Int=50,
     horizon::Int=50,
-    λ::Float64=1.0,
+    λ::Float64=10.0,        # Temperature for the controller, tune for optimization
     α::Float64=1.0,
     U₀::Vector{Float64}=[0.0],
     cov_mat::Union{Matrix{Float64},Vector{Float64}}=[1.0],
@@ -107,6 +106,7 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     log_traj_weights = Vector{Float64}(undef, num_samples)
     mppi_logger = MPPI_Logger(log_traj, log_traj_costs, log_traj_weights)
     mppi_logger.sample_controls = log_controls
+    # Ensure accumulation buffers are initialized (now handled in struct)
 
     params = MPPI_Policy_Params(
         num_samples, horizon, λ, α, U₀, ss, as, cs,
@@ -227,6 +227,13 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::EnvpoolEnv)
     # Draw exploration noise for each (trajectory k, time t)
     P = Distributions.MvNormal(pol.Σ)
     E = rand(pol.rng, P, K, T)
+    # Increase diversity for Hankel data: scale exploration noise by temperature τ
+    τ = 2.5  # temperature factor (>1 increases noise magnitude)
+    for t ∈ 1:T
+        for k ∈ 1:K
+            E[k, t] .*= τ
+        end
+    end
     Σ_inv = Distributions.invcov(P)
 
     trajectory_cost = zeros(Float64, K)
@@ -330,7 +337,7 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
         writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "U_f_rollout.csv"), Uf, ',')
         writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "Y_f_rollout.csv"), Yf, ',')
     catch err
-        @warn "Failed to save Hankel data" err
+        Base.@warn "Failed to save Hankel data" err
     end
 
     # === Generate G: random linear combinations of Hankel columns (inputs+outputs) ===
@@ -361,7 +368,7 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
         writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "H_full_rollout.csv"), H_full, ',')
         writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "G_rollout.csv"), G, ',')
     catch err
-        @warn "Failed to save G data" err
+        Base.@warn "Failed to save G data" err
     end
 
     # === Add g-based control cost ===
