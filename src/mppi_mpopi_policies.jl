@@ -194,6 +194,9 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::EnvpoolEnv)
 
         control_costs = [γ * uₜ' * Σ_inv * Eᵢ for Eᵢ in Eₜ]
 
+
+        # control_costs = [γ * uₜ' * Σ_inv * Eᵢ for Eᵢ in Eₜ]
+
         model_controls = get_model_controls(action_space(env), Vₜ)
 
         env(model_controls)

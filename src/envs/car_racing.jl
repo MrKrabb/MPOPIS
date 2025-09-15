@@ -215,7 +215,9 @@ function RLBase.reward(env::CarRacingEnv{T}) where {T}
     if exceed_β(env)
         rew += -5000.0
     end
+    # Distance from center line
     rew += -within_tuple.dist
+    # Speed bonus
     rew += 2.0 * norm(env.state[4:5])
     return rew
 end
