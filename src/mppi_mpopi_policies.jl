@@ -192,10 +192,13 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::EnvpoolEnv)
 
         Vₜ = repeat(uₜ', K) + reduce(hcat, E[:, t])'
 
-        control_costs = [γ * uₜ' * Σ_inv * Eᵢ for Eᵢ in Eₜ]
-
-
-        control_costs = [γ * uₜ' * Σ_inv * Eᵢ for Eᵢ in Eₜ]
+        # Original per-sample comprehension (scalar per k):
+        # control_costs = [γ * uₜ' * Σ_inv * Eᵢ for Eᵢ in Eₜ]
+        # Vectorized equivalent using the already-built Vₜ (K×as):
+        # qₜ = (Σ_inv') * uₜ  # as-vector
+        # control_costs = γ .* ((Vₜ .- repeat(uₜ', K)) * qₜ)
+        qₜ = (Σ_inv') * uₜ
+        control_costs = γ .* ((Vₜ .- repeat(uₜ', K)) * qₜ)
 
         model_controls = get_model_controls(action_space(env), Vₜ)
 
