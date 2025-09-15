@@ -227,6 +227,13 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
     E = rand(pol.rng, P, K, T)
     Σ_inv = Distributions.invcov(P)
 
+    # Precompute qₜ = (Σ_inv') * uₜ once per timestep (uₜ is shared across all samples k)
+    q_per_t = Vector{Vector{Float64}}(undef, T)
+    for t ∈ 1:T
+        uₜ = pol.U[((t-1)*as+1):(t*as)]
+        q_per_t[t] = (Σ_inv') * uₜ
+    end
+
     trajectory_cost = zeros(Float64, K)
     # Threads.@threads for k ∈ 1:K
     for k ∈ 1:K
@@ -235,7 +242,11 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
             Eᵢ = E[k, t]
             uₜ = pol.U[((t-1)*as+1):(t*as)]
             Vₜ = uₜ + Eᵢ
-            control_cost = γ * uₜ' * Σ_inv * Eᵢ
+            # Original scalar form (kept for reference):
+            # control_cost = γ * uₜ' * Σ_inv * Eᵢ
+            # Equivalent using precomputed qₜ = (Σ_inv')*uₜ:
+            qₜ = q_per_t[t]
+            control_cost = γ * dot(Eᵢ, qₜ)
             model_controls = get_model_controls(action_space(sim_env), Vₜ)
             sim_env(model_controls)
             # Subtrating based on "reward", Adding based on "cost"
