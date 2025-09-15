@@ -8,6 +8,10 @@ mutable struct MPPI_Logger
     sample_controls::Union{Vector{Matrix{Float64}},Nothing}  # per-sample control sequences (T×as)
 end
 
+# File-wide dependencies for Hankel/G I/O
+using DelimitedFiles
+using Logging
+
 # Convenience constructor preserving old 3-arg usage
 function MPPI_Logger(trajectories::Vector{Matrix{Float64}}, traj_costs::Vector{Float64}, traj_weights::Vector{Float64})
     MPPI_Logger(trajectories, traj_costs, traj_weights, nothing, nothing, nothing)
@@ -138,26 +142,36 @@ function (pol::MPPI_Policy)(env::AbstractEnv)
     as, cs = pol.params.as, pol.params.cs
 
     # === STEP 1: Sample trajectory noises & forward-simulate to accumulate costs ===
-    # Returns trajectory_cost (length K) and E: sampled noises shaped so that
+    # Returns trajectory_cost (length K), E (exploration noises), and G (Hankel-based samples)
     #   E[k, t] gives the perturbation applied at time t for trajectory k (see construction in calculate_trajectory_costs).
-    trajectory_cost, E = calculate_trajectory_costs(pol, env)
+    #   G is a (cs × K) matrix; column k is the g-sequence, chunked per t as size as.
+    trajectory_cost, E, G = calculate_trajectory_costs(pol, env)
 
     # === STEP 2: Convert costs into importance weights ===
     # Lower cost => higher weight (Information-Theoretic or other method)
     weights = compute_weights(pol.params.weight_method, trajectory_cost)
     weights = reshape(weights, K, 1)  # Ensure weights are column vector
 
-    # === STEP 3: Form weighted control adjustment ===
-    # Aggregate (weighted) exploration noise across all trajectories & timesteps
+    # === STEP 3: Form weighted control adjustment (g-based) ===
+    # OLD (E-based) U* aggregation kept for reference:
+    # weighted_noise = zeros(Float64, cs)
+    # for t ∈ 1:T
+    #     for k ∈ 1:K
+    #         weighted_noise[((t-1)*as+1):(t*as)] += weights[k] .* E[k, t]
+    #     end
+    # end
+    # New: aggregate Hankel-based g to compute g* over the horizon
     weighted_noise = zeros(Float64, cs)
     for t ∈ 1:T
+        tspan = ((t-1)*as+1):(t*as)
         for k ∈ 1:K
-            # Add weighted noise for each trajectory at time t
-            weighted_noise[((t-1)*as+1):(t*as)] += weights[k] .* E[k, t]
+            g_tk = G[tspan, k]
+            weighted_noise[tspan] += weights[k] .* g_tk
         end
     end
 
     # === STEP 4: Update nominal control sequence (path integral shift) ===
+    # (Using g* now)
     weighted_controls = pol.U + weighted_noise
     # === STEP 5: Receding horizon: extract first action & roll remaining sequence ===
     control = get_controls_roll_U!(pol, weighted_controls)
@@ -169,6 +183,38 @@ function (pol::MPPI_Policy)(env::AbstractEnv)
     end
 
     # === STEP 7: Return single-step control to environment ===
+    return control
+end
+
+# Preserve Envpool path behavior and signatures (E-based aggregation)
+function (pol::MPPI_Policy)(env::EnvpoolEnv)
+    # === STEP 0: Unpack core dimensions ===
+    K, T = pol.params.num_samples, pol.params.horizon
+    as, cs = pol.params.as, pol.params.cs
+
+    # === STEP 1: Sample noises & rollout (Envpool specialized cost fn) ===
+    trajectory_cost, E = calculate_trajectory_costs(pol, env)
+
+    # === STEP 2: Weights ===
+    weights = compute_weights(pol.params.weight_method, trajectory_cost)
+    weights = reshape(weights, K, 1)
+
+    # === STEP 3: U* from E (original behavior) ===
+    weighted_noise = zeros(Float64, cs)
+    for t ∈ 1:T
+        for k ∈ 1:K
+            weighted_noise[((t-1)*as+1):(t*as)] += weights[k] .* E[k, t]
+        end
+    end
+
+    # === STEP 4: Update + roll ===
+    weighted_controls = pol.U + weighted_noise
+    control = get_controls_roll_U!(pol, weighted_controls)
+
+    if pol.params.log
+        pol.logger.traj_costs = trajectory_cost
+        pol.logger.traj_weights = vec(weights)
+    end
     return control
 end
 
@@ -228,11 +274,18 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
     Σ_inv = Distributions.invcov(P)
 
     # Precompute qₜ = (Σ_inv') * uₜ once per timestep (uₜ is shared across all samples k)
+    # (Kept for reference, but control_cost will switch to g-based)
     q_per_t = Vector{Vector{Float64}}(undef, T)
     for t ∈ 1:T
         uₜ = pol.U[((t-1)*as+1):(t*as)]
         q_per_t[t] = (Σ_inv') * uₜ
     end
+
+    # Storage to build Hankel data from rollouts (inputs and outputs)
+    # We log per-sample, per-time controls and states already in logger when pol.params.log
+    # Here we will always capture minimal U/Y for Hankel regardless of log flag.
+    U_roll = [Matrix{Float64}(undef, T, as) for _ in 1:K]
+    Y_roll = [Matrix{Float64}(undef, T, pol.params.ss) for _ in 1:K]
 
     trajectory_cost = zeros(Float64, K)
     # Threads.@threads for k ∈ 1:K
@@ -242,23 +295,90 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
             Eᵢ = E[k, t]
             uₜ = pol.U[((t-1)*as+1):(t*as)]
             Vₜ = uₜ + Eᵢ
-            # Original scalar form (kept for reference):
-            # control_cost = γ * uₜ' * Σ_inv * Eᵢ
-            # Equivalent using precomputed qₜ = (Σ_inv')*uₜ:
-            qₜ = q_per_t[t]
-            control_cost = γ * dot(Eᵢ, qₜ)
+            # E-based control_cost (previous behavior):
+            # qₜ = q_per_t[t]
+            # control_cost = γ * dot(Eᵢ, qₜ)
             model_controls = get_model_controls(action_space(sim_env), Vₜ)
             sim_env(model_controls)
-            # Subtrating based on "reward", Adding based on "cost"
-            trajectory_cost[k] = trajectory_cost[k] - reward(sim_env) + control_cost
+            # Log for Hankel
+            @inbounds U_roll[k][t, :] = Vₜ
+            @inbounds Y_roll[k][t, :] = state(sim_env)
+            # Only reward contribution for now; g-based cost will be added after G is formed
+            trajectory_cost[k] = trajectory_cost[k] - reward(sim_env)
             if pol.params.log
-                # pol.logger.trajectories[k][t, :] = sim_env.state
                 pol.logger.trajectories[k][t, :] = state(sim_env)
                 pol.logger.sample_controls[k][t, :] = Vₜ
             end
         end
     end
-    return trajectory_cost, E
+
+    # === Build Hankel matrices (U_f, Y_f) per DeePC “shallows” ===
+    # We adopt a simple setting with T_ini = 0 and prediction horizon N_pred = T,
+    # so the future block is the whole rollout window for constructing combinations.
+    # Stack all rollouts vertically across samples to get a single data matrix for Hankel.
+    Ucat = reduce(vcat, [U_roll[k] for k in 1:K])'  # shape: as × (K*T)
+    Ycat = reduce(vcat, [Y_roll[k] for k in 1:K])'  # shape: ss × (K*T)
+
+    T_ini = 0; N_pred = T
+    # With T_ini=0, the Hankel future block from hankel_blocks is essentially windowed columns.
+    Uf = hankel_blocks(Ucat, max(1, N_pred))          # (as*N_pred) × (K*T - N_pred + 1)
+    Yf = hankel_blocks(Ycat, max(1, N_pred))          # (ss*N_pred) × (K*T - N_pred + 1)
+
+    # Save Hankel blocks for inspection (optional best-effort)
+    try
+        mkpath(joinpath(dirname(@__FILE__), "..", "hankel_data"))
+        writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "U_f_rollout.csv"), Uf, ',')
+        writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "Y_f_rollout.csv"), Yf, ',')
+    catch err
+        @warn "Failed to save Hankel data" err
+    end
+
+    # === Generate G: random linear combinations of Hankel columns (inputs+outputs) ===
+    # Let H_full = [Uf; Yf]; sample random a_k and form ĝ_k = H_full * a_k.
+    # Then extract the input (Uf) segment as g_k for cost shaping.
+    H_full = vcat(Uf, Yf)
+    cols = size(H_full, 2)
+    cs = pol.params.cs  # as*T
+    G = Matrix{Float64}(undef, cs, K)
+    for k ∈ 1:K
+        a_k = randn(pol.rng, cols)
+        g_hat = H_full * a_k  # length as*N_pred + ss*N_pred
+        g_k = g_hat[1:cs]     # use the input part only for control shaping
+        # If needed, truncate or pad to exactly as*T
+        if length(g_k) > cs
+            G[:, k] = g_k[1:cs]
+        elseif length(g_k) < cs
+            tmp = zeros(cs)
+            tmp[1:length(g_k)] = g_k
+            G[:, k] = tmp
+        else
+            G[:, k] = g_k
+        end
+    end
+
+    # Persist G for debugging
+    try
+        writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "H_full_rollout.csv"), H_full, ',')
+        writedlm(joinpath(dirname(@__FILE__), "..", "hankel_data", "G_rollout.csv"), G, ',')
+    catch err
+        @warn "Failed to save G data" err
+    end
+
+    # === Add g-based control cost ===
+    # Interpret g_k as the sequence contribution; per-time dot with (Σ_inv')*u_t is analogous to previous shaping but with g.
+    # Compute cost contribution as γ * sum_t dot(g_{k,t}, q_t)
+    for k ∈ 1:K
+        acc = 0.0
+        for t ∈ 1:T
+            tspan = ((t-1)*as+1):(t*as)
+            qₜ = q_per_t[t]
+            g_tk = G[tspan, k]
+            acc += dot(g_tk, qₜ)
+        end
+        trajectory_cost[k] += γ * acc
+    end
+
+    return trajectory_cost, E, G
 end
 
 #######################################
