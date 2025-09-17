@@ -27,6 +27,11 @@ struct MPPI_Policy_Params{M<:AbstractWeightMethod}
     cs::Int
     weight_method::M
     log::Bool
+    # Option D (future prediction shaping) parameters
+    pred_future_weight::Float64      # weight w_fut (>=0)
+    pred_future_power::Float64       # exponent p (e.g., 1.0 for |d|, 2.0 for d^2)
+    pred_future_use_mean::Bool       # use mean over horizon (true) or sum (false)
+    pred_future_cap::Float64         # optional cap on per-step dist before power (Inf to disable)
 end
 
 """
@@ -54,7 +59,12 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     weight_method::Symbol=:IT,
     elite_threshold::Float64=0.8,
     rng::AbstractRNG=Random.GLOBAL_RNG,
-    log::Bool=false
+    log::Bool=false,
+    # Option D (future prediction shaping) kwargs
+    pred_future_weight::Float64=0.2,
+    pred_future_power::Float64=2.0,
+    pred_future_use_mean::Bool=true,
+    pred_future_cap::Float64=Inf,
 )
 
     # State space size
@@ -109,8 +119,9 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     # Ensure accumulation buffers are initialized (now handled in struct)
 
     params = MPPI_Policy_Params(
-        num_samples, horizon, λ, α, U₀, ss, as, cs,
-        weight_m, log
+    num_samples, horizon, λ, α, U₀, ss, as, cs,
+    weight_m, log,
+    pred_future_weight, pred_future_power, pred_future_use_mean, pred_future_cap
     )
     return params, U₀, Σ, rng, mppi_logger
 end
@@ -385,18 +396,29 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
         trajectory_cost[k] += γ * acc
     end
 
-    # Add predicted centerline distance shaping using Hankel-based output predictions
-    # Mirror reward's use of `within_track(...).dist` by subtracting it as part of the cost
-    for k ∈ 1:K
-        dist_sum = 0.0
-        for t ∈ 1:T
-            pos_t = Ypos_pred[t, :, k]  # (x,y)
-            # within_track(track, position)::NamedTuple(within, dist, ...)
-            wt = within_track(env.track, pos_t)
-            dist_sum += wt.dist
+    # Option D: Future-shaping using predicted centerline distances over the horizon
+    # Add cost = w_fut * aggregator_t ( clamp(dist,cap)^p )
+    w_fut = pol.params.pred_future_weight
+    if w_fut > 0
+        p_pow = pol.params.pred_future_power
+        use_mean = pol.params.pred_future_use_mean
+        cap = pol.params.pred_future_cap
+        for k ∈ 1:K
+            acc = 0.0
+            for t ∈ 1:T
+                pos_t = Ypos_pred[t, :, k]  # (x,y)
+                wt = within_track(env.track, pos_t)  # returns .dist
+                d = wt.dist
+                if isfinite(cap)
+                    d = clamp(d, 0.0, cap)
+                end
+                acc += d^p_pow
+            end
+            if use_mean
+                acc /= T
+            end
+            trajectory_cost[k] += w_fut * acc
         end
-        # Since trajectory_cost subtracts reward, and reward adds `dist`, we subtract it here
-        trajectory_cost[k] -= dist_sum
     end
 
     return trajectory_cost, E, G, Ypos_pred
