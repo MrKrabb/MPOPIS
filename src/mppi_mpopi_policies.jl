@@ -32,6 +32,12 @@ struct MPPI_Policy_Params{M<:AbstractWeightMethod}
     pred_future_power::Float64       # exponent p (e.g., 1.0 for |d|, 2.0 for d^2)
     pred_future_use_mean::Bool       # use mean over horizon (true) or sum (false)
     pred_future_cap::Float64         # optional cap on per-step dist before power (Inf to disable)
+    pred_future_steps::Int           # number of lookahead steps to consider (0 => full horizon)
+    # Sampling and shaping controls
+    noise_temperature::Float64       # scales exploration noise E (AbstractEnv path)
+    hankel_coeff_std::Float64        # std for Hankel coeffs a_k (scaled by 1/sqrt(cols))
+    g_steer_clip::Float64            # clip for g_steer per-step (Inf to disable)
+    g_shaping_weight::Float64        # scales the g-based control shaping term
 end
 
 """
@@ -52,7 +58,7 @@ kwargs:
 function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     num_samples::Int=50,
     horizon::Int=50,
-    λ::Float64=60.0,        # Temperature for the controller, tune for optimization
+    λ::Float64=60.0,
     α::Float64=1.0,
     U₀::Vector{Float64}=[0.0],
     cov_mat::Union{Matrix{Float64},Vector{Float64}}=[1.0],
@@ -65,6 +71,12 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     pred_future_power::Float64=2.0,
     pred_future_use_mean::Bool=true,
     pred_future_cap::Float64=Inf,
+    pred_future_steps::Int=0,
+    # Sampling and shaping controls
+    noise_temperature::Float64=1.0,
+    hankel_coeff_std::Float64=0.2,
+    g_steer_clip::Float64=0.4,
+    g_shaping_weight::Float64=0.7,
 )
 
     # State space size
@@ -97,7 +109,6 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     if size(cov_mat)[1] == as
         cov_mat = block_diagm(cov_mat, repeat_num)
     end
-    size(cov_mat)[1] == check_size || error("Covariance matrix size problem")
     size(cov_mat)[1] == size(cov_mat)[2] || error("Covriance must be square")
     Σ = cov_mat
 
@@ -119,9 +130,11 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     # Ensure accumulation buffers are initialized (now handled in struct)
 
     params = MPPI_Policy_Params(
-    num_samples, horizon, λ, α, U₀, ss, as, cs,
-    weight_m, log,
-    pred_future_weight, pred_future_power, pred_future_use_mean, pred_future_cap
+        num_samples, horizon, λ, α, U₀, ss, as, cs,
+        weight_m, log,
+        pred_future_weight, pred_future_power, pred_future_use_mean, pred_future_cap,
+        pred_future_steps,
+        noise_temperature, hankel_coeff_std, g_steer_clip, g_shaping_weight,
     )
     return params, U₀, Σ, rng, mppi_logger
 end
