@@ -1,3 +1,5 @@
 *.vscode
 Manifest.toml
 *.DS_Store
+*.gif
+*.jld2

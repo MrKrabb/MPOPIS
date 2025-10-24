@@ -271,6 +271,11 @@ function calc_tire_fz(params::CarRacingEnvParams, fx, tire::Char)
     return (mass * l_t * 9.81 + h_cm * fx) / L
 end
 
+function set_state(env::CarRacingEnv, s::Vector{Float64})
+    env.t += 1
+    env.state = s
+end
+
 """
 Planar single-track model with tire forces coming from a
 single-friction-coefficient brush tire model.

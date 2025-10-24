@@ -18,6 +18,25 @@ struct MPPI_Policy_Params{M<:AbstractWeightMethod}
     log::Bool
 end
 
+mutable struct Data_Logger
+    trajectories::Vector{Matrix{Float64}}
+    traj_costs::Vector{Float64}
+    traj_weights::Vector{Float64}
+end
+
+struct Data_Policy_Params{M<:AbstractWeightMethod}
+    num_samples::Int
+    horizon::Int
+    λ::Float64
+    α::Float64
+    U₀::Vector{Float64}
+    ss::Int
+    as::Int
+    cs::Int
+    weight_method::M
+    log::Bool
+end
+
 """
 MPPI_Policy_Params(env::AbstractEnv, type::Symbol; kwargs...)
     Construct the mppi policy parameter struct
@@ -43,7 +62,7 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
     weight_method::Symbol=:IT,
     elite_threshold::Float64=0.8,
     rng::AbstractRNG=Random.GLOBAL_RNG,
-    log::Bool=false
+    log::Bool=true
 )
 
     # State space size
@@ -99,6 +118,73 @@ function MPPI_Policy_Params(env::AbstractEnv, type::Symbol;
         weight_m, log
     )
     return params, U₀, Σ, rng, mppi_logger
+end
+
+function Data_Policy_Params(env::AbstractEnv, type::Symbol;
+    num_samples::Int=50,
+    horizon::Int=50,
+    λ::Float64=1.0,
+    α::Float64=1.0,
+    U₀::Vector{Float64}=[0.0],
+    cov_mat::Union{Matrix{Float64},Vector{Float64}}=[1.0],
+    weight_method::Symbol=:IT,
+    elite_threshold::Float64=0.8,
+    rng::AbstractRNG=Random.GLOBAL_RNG,
+    log::Bool=true
+)
+    # State space size
+    if isa(state(env), Vector)
+        ss = length(state(env))
+    elseif isa(state(env), Matrix)
+        ss = size(state(env), 2)
+    else
+        error("State must be Vector or Matrix")
+    end
+
+    as = action_space_size(action_space(env)) # Action space size
+    cs = as * horizon                         # Control size (number of actions per sample)
+
+    if length(U₀) == as
+        U₀ = repeat(U₀, horizon)
+    end
+    length(U₀) == cs || error("U₀ must be length of action space or control space")
+
+    if type == :data
+        repeat_num = 1
+        check_size = as
+    else
+        error("Incorrect type for Data")
+    end
+
+    if size(cov_mat)[1] == as
+        cov_mat = block_diagm(cov_mat, repeat_num)
+    end
+    size(cov_mat)[1] == check_size || error("Covariance matrix size problem")
+    size(cov_mat)[1] == size(cov_mat)[2] || error("Covriance must be square")
+    Σ = cov_mat
+
+    if weight_method == :IT
+        weight_m = Information_Theoretic(λ)
+    elseif cost_method == :CE
+        n = round(Int, num_samples * (1 - elite_threshold))
+        weight_m = Cross_Entropy(elite_threshold, n)
+    else
+        error("No cost method implemented for $weight_method")
+    end
+
+    log_traj = [Matrix{Float64}(undef, (horizon, ss)) for _ in 1:num_samples]
+    log_traj_costs = Vector{Float64}(undef, num_samples)
+    log_traj_weights = Vector{Float64}(undef, num_samples)
+    data_logger = Data_Logger(log_traj, log_traj_costs, log_traj_weights)
+
+    params = Data_Policy_Params(
+        num_samples, horizon, λ, α, U₀, ss, as, cs,
+        weight_m, log
+    )
+
+    @load "H_sub.jld2" X_sub
+    H=X_sub
+    return params, U₀, Σ, rng, data_logger, H
 end
 
 #######################################
@@ -210,6 +296,116 @@ function calculate_trajectory_costs(pol::MPPI_Policy, env::AbstractEnv)
                 # pol.logger.trajectories[k][t, :] = sim_env.state
                 pol.logger.trajectories[k][t, :] = state(sim_env)
             end
+        end
+    end
+
+    return trajectory_cost, E
+end
+
+#######################################
+# Data_Policy
+#######################################
+mutable struct Data_Policy{R<:AbstractRNG} <: AbstractPathIntegralPolicy
+    params::Data_Policy_Params
+    env::AbstractEnv
+    U::Vector{Float64}
+    Σ::Matrix{Float64}
+    rng::R
+    logger::Data_Logger
+    H::Vector{Matrix{Float64}}  # Replay Buffer
+end
+
+function Data_Policy(env::AbstractEnv; kwargs...)
+    params, U₀, Σ, rng, mppi_logger, H = Data_Policy_Params(env, :data; kwargs...)
+    return Data_Policy(params, env, U₀, Σ, rng, mppi_logger, H)
+end
+
+function (pol::Data_Policy)(env::AbstractEnv)
+    K, T = pol.params.num_samples, pol.params.horizon
+    as, cs = pol.params.as, pol.params.cs
+    trajectory_cost, E = calculate_trajectory_costs(pol, env)
+
+    # Compute weights based on weight method
+    weights = compute_weights(pol.params.weight_method, trajectory_cost)
+    weights = reshape(weights, K, 1)
+
+    # Weight the noise based on the calcualted weights
+    weighted_noise = zeros(Float64, cs)
+    for t ∈ 1:T
+        for k ∈ 1:K
+            weighted_noise[((t-1)*as+1):(t*as)] += weights[k] .* E[k, t]
+        end
+    end
+    weighted_controls = pol.U + weighted_noise
+    control = get_controls_roll_U!(pol, weighted_controls)
+
+    if pol.params.log
+        pol.logger.traj_costs = trajectory_cost
+        pol.logger.traj_weights = vec(weights)
+    end
+
+    return control
+end
+
+
+function sample_trajectories(H, x0, K, T)
+    # buffer: Replay Buffer mit gespeicherten Aktionen/Trajektorien
+    # x0: Startzustand
+    # K: Anzahl der Trajektorien
+    # T: Länge der Trajektorien
+
+    # Distanzfunktion, z.B. euklidische Norm
+    dist_to_ist(H_i) = norm(H_i[1, 1:3] .- x0)
+
+
+
+
+    # Sortiere H nach Ähnlichkeit des ersten Zustands zu x_ist
+    idx = sortperm(H, by=dist_to_ist)
+    idx = idx[1:K]  # Wähle die K ähnlichsten Trajektorien aus
+    H_sorted = H[idx]
+    sampled_actions = [h[:, 4:5] for h in H_sorted]  # Extrahiere die Aktionen der ausgewählten Trajektorien
+    sampled_outputs = [h[:, 1:3] for h in H_sorted]  # Extrahiere die Zustände der ausgewählten Trajektorien
+    return  sampled_actions, sampled_outputs
+end
+
+function calculate_trajectory_costs(pol::Data_Policy, env::AbstractEnv)
+    K, T = pol.params.num_samples, pol.params.horizon
+    # K ist die Anzahl der Trajektorien
+    # T ist die Länge der Trajektorien
+    as = pol.params.as # Action space size (Dimension von u)
+
+    γ = pol.params.λ * (1 - pol.params.α) # Skalierungsfaktor für die Steuerungskosten bestehend aus λ und α als Dämpfung
+
+    x0=state(env)[4:6]  # Aktueller Zustand des Environments
+
+    # Statt Normalverteilung -> Replay Buffer
+    sampled_actions, sampled_outputs = sample_trajectories(pol.H, x0, K, T)
+    P = Distributions.MvNormal(pol.Σ)
+    E = rand(pol.rng, P, K, T)
+    trajectory_cost = zeros(Float64, K)
+    for k ∈ 1:K
+        sim_env = copy(env) # Slower, but allows for multi threading
+        for t ∈ 1:T
+            vₜ = sampled_actions[k][t, :] # Entnommene Aktion aus dem Replay Buffer
+            control_cost = γ * vₜ'
+
+            #set_state(sim_env, sampled_outputs[k, t, :]) # Setze den Zustand des Environments auf den gespeicherten Zustand)
+
+            model_controls = get_model_controls(action_space(sim_env), vₜ)
+            sim_env(model_controls)
+            # Subtrating based on "reward", Adding based on "cost"
+            trajectory_cost[k] = trajectory_cost[k] - reward(sim_env) + sum(control_cost)
+
+            # Subtrating based on "reward", Adding based on "cost"
+            #trajectory_cost = trajectory_cost - reward(env) + control_costs
+            if pol.params.log
+                # pol.logger.trajectories[k][t, :] = sim_env.state
+                pol.logger.trajectories[k][t, :] = state(sim_env)
+            end
+            uₜ = pol.U[((t-1)*as+1):(t*as)]
+            Eᵢ = vₜ - uₜ
+            E[k, t] = Eᵢ 
         end
     end
     return trajectory_cost, E

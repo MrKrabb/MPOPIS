@@ -48,6 +48,7 @@ kwargs:
  - text_on_plot_xy = (80.0, -60.0)                   # XY position of output text (if applicable)
  - save_gif = false,                                 # Save gif
 """
+
 function simulate_car_racing(;
     num_trials = 1,
     num_steps = 200,
@@ -79,7 +80,7 @@ function simulate_car_racing(;
     text_on_plot_xy = (80.0, -60.0),
     save_gif = false,
 )
-
+    
     if num_cars > 1
         sim_type = :mcr
     else
@@ -166,6 +167,8 @@ function simulate_car_racing(;
     end
     @printf(" : %7s", "Ex Time")
     @printf("\n")
+
+    trajectories = Vector{Vector{Matrix{Float64}}}()
 
     for k ∈ 1:num_trials
         
@@ -278,6 +281,8 @@ function simulate_car_racing(;
                 env.done = true
             end
             prev_y = curr_y
+
+            push!(trajectories, deepcopy(pol.logger.trajectories))
         end
         
         # Stop timer
@@ -413,5 +418,7 @@ function simulate_car_racing(;
         println("Saving gif...$gif_name")
         gif(anim, gif_name, fps=10)
     end
+
+    @save "trajectories.jld2" trajectories=trajectories
 end
 
