@@ -3,7 +3,6 @@ module MPOPIS
 
 using Reexport
 using CSV
-using DelimitedFiles
 using Printf
 using LinearAlgebra
 using IntervalSets
@@ -22,6 +21,9 @@ using Plots
 @reexport import Plots.plot
 using ProgressMeter
 using Dates
+
+using JLD2
+
 
 export
     MPPI_Policy,
@@ -44,8 +46,6 @@ export
     _update_states_envs2env,
     _update_states_env2envs,
     simulate_car_racing,
-    simulate_car_racing_deepc,
-    simulate_deppi_car,
     simulate_mountaincar,
     simulate_cartpole,
     simulate_envpool_env,
@@ -76,7 +76,6 @@ include("mppi_mpopi_policies.jl")
 include("envs/plots.jl")
 include("examples/example_utils.jl")
 include("examples/car_example.jl")
-include("examples/car_example_deepc.jl")
 include("examples/mountaincar_example.jl")
 include("examples/cartpole_example.jl")
 include("examples/envpool_example.jl")

@@ -29,6 +29,18 @@ function get_policy(
             log=pol_log,
             rng=MersenneTwister(),
         )
+    elseif policy_type == :data
+        pol = Data_Policy(
+            env,
+            num_samples=num_samples,
+            horizon=horizon,
+            λ=λ,
+            α=α,
+            U₀=U₀,
+            cov_mat=cov_mat,
+            log=pol_log,
+            rng=MersenneTwister(),
+        )
     elseif policy_type == :gmppi
         pol = GMPPI_Policy(
             env,

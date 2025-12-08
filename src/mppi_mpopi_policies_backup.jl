@@ -1,5 +1,3 @@
-using Random
-using LinearAlgebra
 
 mutable struct MPPI_Logger
     trajectories::Vector{Matrix{Float64}}
@@ -315,52 +313,32 @@ mutable struct Data_Policy{R<:AbstractRNG} <: AbstractPathIntegralPolicy
     rng::R
     logger::Data_Logger
     H::Vector{Matrix{Float64}}  # Replay Buffer
-    g_mean::Vector{Float64}      # mean selector in selector-space (length N)
-    g_prev::Union{Nothing, Vector{Float64}}  # last optimal selector (length N)
 end
 
 function Data_Policy(env::AbstractEnv; kwargs...)
     params, U₀, Σ, rng, mppi_logger, H = Data_Policy_Params(env, :data; kwargs...)
-    # initialize selector mean to zeros (N = number of stored trajectories)
-    N = length(H)
-    # initialize selector mean randomly in [-1, 1] so first timestep uses a
-    # randomized selector. Subsequent timesteps sample around this mean by
-    # adding Gaussian noise in `sample_trajectories`.
-    g_mean = 2.0 .* rand(rng, N) .- 1.0
-    g_prev = nothing
-    return Data_Policy(params, env, U₀, Σ, rng, mppi_logger, H, g_mean, g_prev)
+    return Data_Policy(params, env, U₀, Σ, rng, mppi_logger, H)
 end
 
 function (pol::Data_Policy)(env::AbstractEnv)
     # Use the size of the replay buffer stored on the policy instance
     K, T = pol.params.num_samples, pol.params.horizon # pol.params.num_samples, pol.params.horizon
     as, cs = pol.params.as, pol.params.cs
-    trajectory_cost, E, g, Hmat_actions = calculate_trajectory_costs(pol, env)
+    trajectory_cost, E = calculate_trajectory_costs(pol, env)
 
     # Compute weights based on weight method
     weights = compute_weights(pol.params.weight_method, trajectory_cost)
     weights = reshape(weights, K, 1)
 
-    # Option A: compute a weighted selector g and build the final control as a linear
-    # combination of stored trajectories (absolute actions)
-    # weights is length-K (may be Kx1); make it a vector
-    wvec = vec(weights)
-    # weighted selector (N-vector)
-    weighted_g = g * wvec
-    # weighted_actions_flat has length T*as == cs
-    weighted_actions_flat = Hmat_actions * weighted_g
-    weighted_controls = vec(weighted_actions_flat)
-    control = get_controls_roll_U!(pol, weighted_controls)
-
-    # Update selector-space mean so future sampling centers on the improved selector
-    try
-        pol.g_mean = copy(weighted_g)
-        pol.g_prev = copy(vec(weighted_g))
-    catch _
-        # if sizes mismatch for any reason, resize safely
-        pol.g_mean = copy(vec(weighted_g))
-        pol.g_prev = copy(vec(weighted_g))
+    # Weight the noise based on the calcualted weights
+    weighted_noise = zeros(Float64, cs)
+    for t ∈ 1:T
+        for k ∈ 1:K
+            weighted_noise[((t-1)*as+1):(t*as)] += weights[k] .* E[k, t]
+        end
     end
+    weighted_controls = pol.U + weighted_noise
+    control = get_controls_roll_U!(pol, weighted_controls)
 
     if pol.params.log
         pol.logger.traj_costs = trajectory_cost
@@ -371,7 +349,7 @@ function (pol::Data_Policy)(env::AbstractEnv)
 end
 
 
-function sample_trajectories(H, x0, K, T; g_mean=nothing, σ_g=0.1, rng=Random.GLOBAL_RNG)
+function sample_trajectories(H, x0, K, T)
     # buffer: Replay Buffer mit gespeicherten Aktionen/Trajektorien
     # x0: Startzustand
     # K: Anzahl der Trajektorien
@@ -421,17 +399,11 @@ function sample_trajectories(H, x0, K, T; g_mean=nothing, σ_g=0.1, rng=Random.G
     
 
     # Build continuous selector matrix g (N x K)
-    # If a selector-space mean is provided, sample columns around that mean.
-    if g_mean === nothing
-        # Simple default: uniform on [-1,1]
-        g = 2.0 .* rand(rng, N, K) .- 1.0
-    else
-        length(g_mean) == N || error("g_mean must have length equal to number of stored trajectories N=$N")
-        # Gaussian perturbation around g_mean (columns are candidates)
-        g = repeat(reshape(g_mean, N, 1), 1, K) .+ σ_g .* randn(rng, N, K)
-        # keep coefficients bounded to a reasonable interval
-        g = clamp.(g, -1.0, 1.0)
-    end
+    # Each column of g is a vector of coefficients in [-1, 1] that linearly
+    # combine the stored trajectories. Using continuous values lets us sample
+    # linear combinations instead of simple one-hot selections.
+    # Simple default: uniform on [-1,1]
+    g = 2.0 .* rand(N, K) .- 1.0
 
     # # Optional: bias rows by similarity to x0 (commented out by default)
     # # dist = [dist_to_ist(H[i]) for i in 1:N]
@@ -439,24 +411,20 @@ function sample_trajectories(H, x0, K, T; g_mean=nothing, σ_g=0.1, rng=Random.G
     # # g .= g .* reshape(kernel, N, 1)
     # # Vectorized selection via a single matrix multiply
     
-    # Optionally project selector columns so the first stored state matches x0.
-    # This enforces A * g[:,k] == x0 (approximately) for each candidate g[:,k].
-    reg = 1e-9                # small regularizer for numerical stability
-    ss = size(H_states, 2)    # state dimension
-    # A: (ss x N) matrix containing states at timestep 1 for each stored trajectory
-    A = H_states[1, :, :]     # (ss, N) in Julia ordering; suitable as A (ss x N)
-    b = reshape(x0, ss, 1)    # (ss x 1)
+    # reg = 1e-9                # small regularizer for numerical stability
+    # ss = size(H_states, 2)    # state dimension
+    # # A: (ss x N) matrix containing states at timestep 1 for each stored trajectory
+    # A = H_states[1, :, :]     # (ss, N) in Julia ordering; suitable as A (ss x N)
+    # b = reshape(x0, ss, 1)    # (ss x 1)
 
-    # Compute C = A' * inv(A*A' + reg*I) robustly (fallback to pinv if necessary)
-    M = A * A'                # (ss x ss)
+    # # Compute C = A' * inv(A*A' + reg*I) robustly (fallback to pinv if necessary)
+    # M = A * A'                # (ss x ss)
+    # C = A' * inv(M + reg * I(ss))    # (N x ss)
 
-    C = A' * inv(M + reg * I)
-
-
-    # Project all columns of g so that A * g == b (to numerical precision)
-    AG = A * g                # (ss x K)
-    Delta = AG .- b           # (ss x K)  (b broadcasted across columns)
-    g = g .- C * Delta        # (N x K)  now approximately satisfies A * g ≈ b
+    # # Project all columns of g so that A * g == b (to numerical precision)
+    # AG = A * g                # (ss x K)
+    # Delta = AG .- b           # (ss x K)  (b broadcasted across columns)
+    # g = g .- C * Delta        # (N x K)  now approximately satisfies A * g ≈ b
 
 
     Hmat_actions = reshape(H_actions, T * as, N)   # (T*as) x N
@@ -467,8 +435,7 @@ function sample_trajectories(H, x0, K, T; g_mean=nothing, σ_g=0.1, rng=Random.G
     S_states = Hmat_states * g                     # (T*ss) x K
     sampled_outputs = [reshape(S_states[:, k], T, ss) for k in 1:K]
 
-    # Return selector matrix g and Hmat_actions so callers can combine selectors directly
-    return sampled_actions, sampled_outputs, g, Hmat_actions
+    return sampled_actions, sampled_outputs
 end
 
 function calculate_trajectory_costs(pol::Data_Policy, env::AbstractEnv)
@@ -484,8 +451,7 @@ function calculate_trajectory_costs(pol::Data_Policy, env::AbstractEnv)
     x0=state(env)[4:6]  # Aktueller Zustand des Environments
 
     # Statt Normalverteilung -> Replay Buffer
-    center = pol.g_prev === nothing ? pol.g_mean : pol.g_prev
-    sampled_actions, sampled_outputs, g, Hmat_actions = sample_trajectories(pol.H, x0, K, T; g_mean=center, σ_g=0.1, rng=pol.rng)
+    sampled_actions, sampled_outputs = sample_trajectories(pol.H, x0, K, T)
     P = Distributions.MvNormal(pol.Σ)
     E = rand(pol.rng, P, K, T)
     trajectory_cost = zeros(Float64, K)
@@ -513,7 +479,7 @@ function calculate_trajectory_costs(pol::Data_Policy, env::AbstractEnv)
             E[k, t] = Eᵢ 
         end
     end
-    return trajectory_cost, E, g, Hmat_actions
+    return trajectory_cost, E
 end
 
 #######################################

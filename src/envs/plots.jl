@@ -122,6 +122,34 @@ function plot(
             )
         end
     end
+    # Overlay the planned path computed from the selector mean (pol.g_mean)
+    try
+        N = length(pol.H)
+        if N > 0 && length(pol.g_mean) == N
+            T = pol.params.horizon
+            as = pol.params.as
+            action_cols = 4:5
+            H_actions = Array{Float64}(undef, T, as, N)
+            for i in 1:N
+                h = pol.H[i]
+                H_actions[:, :, i] = h[:, action_cols]
+            end
+            Hmat_actions = reshape(H_actions, T * as, N)
+            weighted_actions_flat = Hmat_actions * pol.g_mean
+            weighted_actions = reshape(weighted_actions_flat, T, as)
+            planned_states = simulate_actions(env, weighted_actions, pol)
+            px = planned_states[:, 1]
+            py = planned_states[:, 2]
+            p = plot!(px, py,
+                linewidth=2.5,
+                linecolor=:blue,
+                linestyle=:dash,
+                label="planned_path"
+            )
+        end
+    catch err
+        @warn "Failed to overlay planned path: $err"
+    end
     return p
 end
 

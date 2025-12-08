@@ -87,10 +87,10 @@ end
 
 function get_controls_roll_U!(pol::AbstractPathIntegralPolicy, weighted_controls::Vector)
     as = pol.params.as
-    # STEP 5A: Extract first action (receding horizon application)
+    # Get control (action set for the first time step)
     control = get_model_controls(action_space(pol.env), weighted_controls[1:as])
 
-    # STEP 5B: Roll horizon: shift remaining controls left & append nominal tail
+    # Roll the control policy so next interation we start with a mean of pol.U
     if pol.params.horizon > 1
         pol.U[1:(end-as)] = weighted_controls[(as+1):end]
         pol.U[(end-as):end] = pol.params.U₀[(end-as):end]
@@ -144,48 +144,20 @@ function rollout_model(env::AbstractEnv, T::Int, model_controls::Matrix,
 end
 
 """
-    hankel_blocks(data, L)
-
-Build block Hankel of depth L from data (d × N).
-Rows stacked: [x_k; x_{k+1}; … ; x_{k+L-1}] per column.
+simulate_actions(env, actions, pol)
+    Forward-simulate a sequence of actions (T x as) on a copy of `env` using
+    `get_model_controls` and return the resulting states as a (T x ss) matrix.
 """
-function hankel_blocks(data::AbstractMatrix{T}, L::Int) where T
-    d, N = size(data)
-    N ≥ L || error("Need N ≥ L (got N=$N, L=$L)")
-    cols = N - L + 1
-    H = Matrix{T}(undef, d * L, cols)
-    @inbounds for j in 1:cols
-        # window j … j+L-1
-        w = data[:, j:j+L-1]              # d × L
-        # reshape into (d*L) vector (column-major already groups by time after permute)
-        H[:, j] = reshape(permutedims(w, (2,1)), d*L)
+function simulate_actions(env::AbstractEnv, actions::Matrix{Float64}, pol::AbstractPathIntegralPolicy)
+    sim_env = copy(env)
+    T, as = size(actions)
+    ss = pol.params.ss
+    states = Matrix{Float64}(undef, T, ss)
+    for t in 1:T
+        v_t = vec(actions[t, :])
+        model_controls = get_model_controls(action_space(sim_env), v_t)
+        sim_env(model_controls)
+        states[t, :] = state(sim_env)
     end
-    return H
-end
-
-"""
-    build_deepc_blocks(u_hist, y_hist; T_ini, N_pred)
-
-Return (U_p,U_f,Y_p,Y_f) wrapped in struct for DeePC.
-"""
-struct DeePCData{T}
-    U_p::Matrix{T}
-    U_f::Matrix{T}
-    Y_p::Matrix{T}
-    Y_f::Matrix{T}
-    T_ini::Int
-    N_pred::Int
-end
-
-function build_deepc_blocks(u_hist::AbstractMatrix, y_hist::AbstractMatrix; T_ini::Int, N_pred::Int)
-    @assert size(u_hist, 2) == size(y_hist, 2) "u/y length mismatch"
-    L = T_ini + N_pred
-    Hu = hankel_blocks(u_hist, L)
-    Hy = hankel_blocks(y_hist, L)
-    m = size(u_hist, 1); p = size(y_hist, 1)
-    U_p = Hu[1:(m*T_ini), :]
-    U_f = Hu[(m*T_ini+1):(m*L), :]
-    Y_p = Hy[1:(p*T_ini), :]
-    Y_f = Hy[(p*T_ini+1):(p*L), :]
-    return DeePCData(U_p, U_f, Y_p, Y_f, T_ini, N_pred)
+    return states
 end
