@@ -213,7 +213,7 @@ function RLBase.reward(env::CarRacingEnv{T}) where {T}
     # Calculate cost based on the distance to the middle of the lane
     rew += -within_tuple.dist
     # To reward higher velocities
-    rew += 2.0 * norm(env.state[4:5])
+    rew += 5.0 * norm(env.state[4:5])
     # To reward smaller steering angles
     # rew += 2.0 / abs(env.state[7]+1e-3)
     return rew
