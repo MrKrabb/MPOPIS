@@ -210,6 +210,7 @@ function RLBase.reward(env::CarRacingEnv{T}) where {T}
     if exceed_β(env)
         rew += -5000.0
     end
+
     # Calculate cost based on the distance to the middle of the lane
     rew += -within_tuple.dist
     # To reward higher velocities
