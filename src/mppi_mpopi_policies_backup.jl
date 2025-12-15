@@ -1,4 +1,3 @@
-
 mutable struct MPPI_Logger
     trajectories::Vector{Matrix{Float64}}
     traj_costs::Vector{Float64}
