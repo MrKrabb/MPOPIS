@@ -4,4 +4,4 @@ Manifest.toml
 *.csv
 *.gif
 .history/
-trajectories.jld2
+*.jld2
