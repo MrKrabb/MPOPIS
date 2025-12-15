@@ -2,6 +2,5 @@
 Manifest.toml
 *.DS_Store
 *.csv
-*.gif
 .history/
 *.jld2
