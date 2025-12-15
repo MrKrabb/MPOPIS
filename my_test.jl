@@ -42,8 +42,8 @@ function subsample_kmeans_traj(X::Vector{Matrix{Float64}}; k::Int)
     return X[reps]
 end
 
-horizon=100
-num_samples = 100
+horizon=50
+num_samples = 50
 
 simulate_car_racing(save_gif=true, plot_traj=true, policy_type=:mppi,horizon=horizon,num_samples = num_samples, λ=0.1)
 @load "trajectories.jld2" trajectories
@@ -51,7 +51,7 @@ simulate_car_racing(save_gif=true, plot_traj=true, policy_type=:mppi,horizon=hor
 H=Vector{Matrix{Float64}}()
 for j in 1:length(trajectories)
     for k in 1:length(trajectories[j])
-        #println("Trajectory $j, Sample $k:")
+        # println("Trajectory $j, Sample $k:")
         push!(H, trajectories[j][k][:,4:8])  
     end
 end

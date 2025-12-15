@@ -467,7 +467,7 @@ function sample_trajectories(H, x0, K, T; g_mean=nothing, σ_g=0.1, rng=Random.G
     S_states = Hmat_states * g                     # (T*ss) x K
     sampled_outputs = [reshape(S_states[:, k], T, ss) for k in 1:K]
 
-    # Return selector matrix g and Hmat_actions so callers can combine selectors directly
+    # Return selector matfrix g and Hmat_actions so callers can combine selectors directly
     return sampled_actions, sampled_outputs, g, Hmat_actions
 end
 
@@ -485,7 +485,7 @@ function calculate_trajectory_costs(pol::Data_Policy, env::AbstractEnv)
 
     # Statt Normalverteilung -> Replay Buffer
     center = pol.g_prev === nothing ? pol.g_mean : pol.g_prev
-    sampled_actions, sampled_outputs, g, Hmat_actions = sample_trajectories(pol.H, x0, K, T; g_mean=center, σ_g=0.1, rng=pol.rng)
+    sampled_actions, sampled_outputs, g, Hmat_actions = sample_trajectories(pol.H, x0, K, T; g_mean=center, σ_g=0.5, rng=pol.rng)
     P = Distributions.MvNormal(pol.Σ)
     E = rand(pol.rng, P, K, T)
     trajectory_cost = zeros(Float64, K)
