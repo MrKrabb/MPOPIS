@@ -4,4 +4,3 @@ Manifest.toml
 *.csv
 .history/
 *.jld2
-*.gif
