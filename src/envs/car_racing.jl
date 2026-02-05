@@ -155,8 +155,8 @@ Random.seed!(env::CarRacingEnv, seed) = Random.seed!(env.rng, seed)
 
 function RLBase.action_space(::CarRacingEnv{T}) where {T}
     # Removed ability to brake by setting min pedal to 0.0
-    # action_space = ClosedInterval{Vector{T}}([-1.0, -1.0], [1.0, 1.0])
-    action_space = ClosedInterval{Vector{T}}([-1.0, 0.0], [1.0, 1.0])
+    # action_space = ClosedInterval{Vector{T}}([-1.0, -1.0], [1.0, 1.0]) #
+    action_space = ClosedInterval{Vector{T}}([-1.0, 0.0], [1.0, 1.0]) # Breaking disabled
     return action_space
 end
 
