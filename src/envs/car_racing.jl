@@ -82,7 +82,7 @@ function CarRacingEnv(;
     δ_dot_max=deg2rad(90),
     Fx_max=7200.0,
     Fx_min=22500.0,
-    λ_brake=0.6,
+    λ_brake=0.0,
     λ_drive=0.0,
     dt=0.1,
     δt=0.01,
@@ -206,6 +206,7 @@ function RLBase.reward(env::CarRacingEnv{T}) where {T}
     within_tuple = within_track(env)
     # Punish leaving the track
     if !within_tuple.within
+        #rew += -1000000.0
         rew += -1000000.0
     end
     # Punish if sip angle becomes too big
@@ -216,7 +217,7 @@ function RLBase.reward(env::CarRacingEnv{T}) where {T}
     # Calculate cost based on the distance to the middle of the lane
     rew += -within_tuple.dist
     # To reward higher velocities
-    rew += 5.0 * norm(env.state[4:5])
+    rew += 2.0 * norm(env.state[4:5])
     # To reward smaller steering angles
     # rew += 2.0 / abs(env.state[7]+1e-3)
     return rew

@@ -1,10 +1,11 @@
 name = "MPOPIS"
 uuid = "e8a75bc8-90e1-4072-945a-20230e5738f6"
-authors = ["Dylan Asmar <asmar@stanford.edu>"]
 version = "0.2.0"
+authors = ["Dylan Asmar <asmar@stanford.edu>"]
 
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
 CovarianceEstimation = "587fd27a-f159-11e8-2dae-1979310e6154"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
@@ -20,11 +21,10 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
 ReinforcementLearning = "158674fc-8238-5cab-b5ba-03dfc80d1318"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
-Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
-Distances = "b4f34e82-e78d-54a5-968a-f98e89d6e8f7"
 
 [compat]
 CSV = "0.10"
+Clustering = "0.15.8"
 CovarianceEstimation = "0.2"
 Distributions = "0.25"
 DomainSets = "0.7"
@@ -36,5 +36,3 @@ PyCall = "1.96"
 Reexport = "1"
 ReinforcementLearning = "0.11"
 StatsBase = "0.34"
-Clustering = "0.15"
-Distances = "0.10.12"
